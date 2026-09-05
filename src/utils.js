@@ -39,6 +39,20 @@ export function stripHtml(html) {
         .trim();
 }
 
+export function hasConfiguredGenerationSettings(settings) {
+    if (!settings || typeof settings !== 'object') return false;
+    return [
+        settings.backendUrl,
+        settings.backendKey,
+        settings.backendModel,
+        settings.llmUrl,
+        settings.llmKey,
+        settings.llmModel,
+        settings.comfyWorkflow,
+    ].some(value => typeof value === 'string' && value.trim())
+        || Boolean(settings.characterAnchors && Object.keys(settings.characterAnchors).length);
+}
+
 /**
  * 从 LLM 返回文本中安全提取 JSON 对象
  * @param {string} text 

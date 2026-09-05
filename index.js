@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.20
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.21
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -28,6 +28,7 @@ import {
     createAbortError,
     isAbortError,
     throwIfAborted,
+    hasConfiguredGenerationSettings,
 } from './src/utils.js';
 
 import {
@@ -132,7 +133,15 @@ function getSettings() {
 }
 
 function loadSettings() {
-    extension_settings[extensionName] = extension_settings[extensionName] || {};
+    const currentSettings = extension_settings[extensionName];
+    const legacySettings = extension_settings['rp-cinematic-v2'];
+    if (!hasConfiguredGenerationSettings(currentSettings) && hasConfiguredGenerationSettings(legacySettings)) {
+        extension_settings[extensionName] = { ...legacySettings };
+        saveSettingsDebounced();
+        console.info('[RP 电影配图] 已将旧目录配置迁移到正式配置键。');
+    } else {
+        extension_settings[extensionName] = currentSettings || {};
+    }
     const s = extension_settings[extensionName];
     for (const key of Object.keys(defaultSettings)) {
         if (s[key] === undefined) {
@@ -1451,7 +1460,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.20</span>
+            <span class="rpig-header-version">v2.9.21</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2152,7 +2161,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.20</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.21</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2546,7 +2555,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.20</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.21</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2630,5 +2639,5 @@ jQuery(async function () {
     try { mountSettingsPanel(); } catch { /* ignore */ }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.20] 手机自动安装、焦点兜底与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.21] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
 });
