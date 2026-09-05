@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.19
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.20
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -141,6 +141,12 @@ function loadSettings() {
     }
     // 迁移已有设置：禁用手脚裁切旧约束
     s.hideHandsFeet = false;
+}
+
+function parseDirectorLlmOutput(raw) {
+    const json = extractJson(raw) || {};
+    const finalPrompt = String(json.final_prompt || json.prompt || '').trim();
+    return { json, finalPrompt };
 }
 
 function getAllCharacters() {
@@ -791,17 +797,29 @@ async function executeGenerationTask(task) {
                     toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                     return;
                 }
-                const raw = await callLLM(system, userText, s, getContext, { signal });
+                let raw = await callLLM(system, userText, s, getContext, { signal, jsonMode: true });
                 if (!isSessionStillValid()) {
                     toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                     return;
                 }
-                const json = extractJson(raw) || {};
-                directorDraft = (json.final_prompt || '').trim();
+                let parsedDirector = parseDirectorLlmOutput(raw);
+                if (!parsedDirector.finalPrompt) {
+                    setGenStatus('working', '①/⑤ 🧠 焦点镜头格式校正并重试…');
+                    const repairSystem = `你是严格的 JSON 输出修复器。重新完成电影镜头分析，只输出一个合法 JSON 对象，不得输出 Markdown、解释或前后缀。JSON 必须包含 scene_changed、reason、style、shot、scene_anchor、final_prompt、avoid；final_prompt 必须是完整英文生图提示词且不能为空。`;
+                    const repairUser = `${userText}\n\n【上一次不合规返回，仅供纠错】：\n${stripHtml(String(raw || '')).slice(0, 2400)}`;
+                    raw = await callLLM(repairSystem, repairUser, s, getContext, { signal, jsonMode: true });
+                    if (!isSessionStillValid()) {
+                        toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
+                        return;
+                    }
+                    parsedDirector = parseDirectorLlmOutput(raw);
+                }
+                const json = parsedDirector.json;
+                directorDraft = parsedDirector.finalPrompt;
                 avoid = mergeNegativePrompts(avoid, (json.avoid || '').trim());
                 sceneAnchor = (json.scene_anchor || sceneAnchor || '').trim();
                 sceneChanged = json.scene_changed !== false;
-                if (!directorDraft) throw new Error('焦点镜头 LLM 未能生成有效提示词');
+                if (!directorDraft) throw new Error('焦点镜头 LLM 连续两次未返回符合格式的 JSON 提示词');
             }
 
             // 第二部分：上帝视角核对所有在场人物及其空间、视线和互动关系。
@@ -1433,7 +1451,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.19</span>
+            <span class="rpig-header-version">v2.9.20</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2134,7 +2152,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.19</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.20</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2528,7 +2546,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.19</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.20</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2612,5 +2630,5 @@ jQuery(async function () {
     try { mountSettingsPanel(); } catch { /* ignore */ }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.19] 完整版旧目录迁移与移动端工作台已启用。');
+    console.log('[RP 电影配图 v2.9.20] 手机自动安装、焦点兜底与完整工作台已启用。');
 });

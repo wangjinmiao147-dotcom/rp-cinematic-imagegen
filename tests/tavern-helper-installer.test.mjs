@@ -4,11 +4,11 @@ import test from 'node:test';
 
 const installerPath = new URL('../installers/rp-cinematic-imagegen-tavern-helper-installer.json', import.meta.url);
 
-test('Tavern Helper installer is valid, disabled-by-default script JSON', async () => {
+test('Tavern Helper installer is valid and enabled for immediate mobile installation', async () => {
   const installer = JSON.parse(await readFile(installerPath, 'utf8'));
 
   assert.equal(installer.type, 'script');
-  assert.equal(installer.enabled, false);
+  assert.equal(installer.enabled, true);
   assert.equal(installer.name, 'RP 电影配图 · 一键安装/更新');
   assert.equal(installer.button.enabled, true);
   assert.deepEqual(installer.button.buttons, [

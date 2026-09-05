@@ -12,6 +12,25 @@ import {
     timeoutSignal,
 } from './utils.js';
 
+export function extractChatCompletionText(data) {
+    const flatten = (value) => {
+        if (typeof value === 'string') return value.trim();
+        if (Array.isArray(value)) return value.map(flatten).filter(Boolean).join('\n').trim();
+        if (!value || typeof value !== 'object') return '';
+        if (typeof value.text === 'string') return value.text.trim();
+        if (typeof value.content === 'string' || Array.isArray(value.content)) return flatten(value.content);
+        if (typeof value.final_prompt === 'string' || typeof value.prompt === 'string') return JSON.stringify(value);
+        return '';
+    };
+
+    const choice = data?.choices?.[0];
+    return flatten(choice?.message?.content)
+        || flatten(choice?.text)
+        || flatten(data?.output_text)
+        || flatten(data?.response)
+        || '';
+}
+
 /**
  * 统一 LLM 调用
  * @param {string} system 
@@ -73,18 +92,24 @@ export async function callLLM(system, user, settings, getContextFn, options = {}
         { role: 'user', content: user || '' },
     ];
 
-    let res;
-    try {
-        res = await fetch(`${base}/chat/completions`, {
+    const requestCompletion = async (jsonMode) => fetch(`${base}/chat/completions`, {
             method: 'POST',
             headers: headers,
             body: JSON.stringify({
                 model: model,
                 messages: messages,
                 temperature: 0.7,
+                ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
             }),
             signal: combineAbortSignals(signal, timeoutSignal(120000)),
         });
+
+    let res;
+    try {
+        res = await requestCompletion(options.jsonMode === true);
+        if (!res.ok && options.jsonMode === true && (res.status === 400 || res.status === 422)) {
+            res = await requestCompletion(false);
+        }
     } catch (netErr) {
         if (isAbortError(netErr)) throw netErr;
         throw new Error(`LLM 连接失败：${scrubSensitiveText(netErr.message, [key])}`);
@@ -96,9 +121,9 @@ export async function callLLM(system, user, settings, getContextFn, options = {}
     }
 
     const data = await res.json();
-    const content = data?.choices?.[0]?.message?.content;
+    const content = extractChatCompletionText(data);
     if (!content) {
         throw new Error('LLM 返回内容为空');
     }
-    return typeof content === 'string' ? content : JSON.stringify(content);
+    return content;
 }

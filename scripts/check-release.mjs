@@ -44,8 +44,8 @@ if (!existsSync(join(root, installerPath))) {
 } else {
     try {
         const installer = JSON.parse(read(installerPath));
-        if (installer.type !== 'script' || installer.enabled !== false) {
-            errors.push('酒馆助手安装器必须是默认关闭的 script JSON');
+        if (installer.type !== 'script' || installer.enabled !== true) {
+            errors.push('酒馆助手安装器必须是导入后立即运行的已启用 script JSON');
         }
         if (!installer.content?.includes(pkg.repository.url.replace(/\.git$/, ''))) {
             errors.push('酒馆助手安装器未指向 package.json 中的公开仓库');
