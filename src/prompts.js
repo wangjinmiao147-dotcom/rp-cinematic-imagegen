@@ -288,6 +288,17 @@ export function normalizeFinalPromptOutput(raw) {
         .replace(/^(?:final[_ ]prompt|prompt)\s*:\s*/i, '')
         .replace(/^['"]|['"]$/g, '')
         .trim();
+    const refusalPatterns = [
+        /prompt\s+(?:could\s+not|cannot|can't)\s+be\s+submitted/i,
+        /contains?\s+(?:sensitive|prohibited|unsafe)\s+(?:words?|content)/i,
+        /prohibited\s+use\s+policy/i,
+        /violat(?:e|es|ed|ion)\b.{0,100}\b(?:policy|guidelines?|terms|safety)/i,
+        /^(?:i(?:'m|\s+am)\s+sorry|sorry|i\s+cannot|i\s+can't|i\s+am\s+unable|unable\s+to)\b/i,
+        /(?:无法|不能)提交.{0,24}提示词/,
+        /包含.{0,24}敏感(?:词|内容)/,
+        /违反.{0,40}(?:政策|使用规范|安全规则)/,
+    ];
+    if (refusalPatterns.some(pattern => pattern.test(value))) return '';
     return value;
 }
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { normalizeCastCharacters } from '../src/cast.js';
-import { buildFinalizerPrompt, buildOmniscientPrompt } from '../src/prompts.js';
+import { buildFinalizerPrompt, buildOmniscientPrompt, normalizeFinalPromptOutput } from '../src/prompts.js';
 
 const castContext = {
   context: { name1: '秋刀鱼', name2: '女1' },
@@ -45,4 +45,14 @@ test('cast prompts require physical-presence evidence and pass exclusions to fin
   assert.match(finalizer.userText, /明确不入镜名单/);
   assert.match(finalizer.userText, /女2/);
   assert.match(finalizer.userText, /秋刀鱼/);
+});
+
+test('policy refusal text is rejected instead of being sent to the image backend', () => {
+  const refusal = "The prompt could not be submitted. The prompt contains sensitive words that violate Google's Generative AI Prohibited Use policy.";
+  assert.equal(normalizeFinalPromptOutput(refusal), '');
+  assert.equal(normalizeFinalPromptOutput('无法提交该提示词，因为其中包含敏感词并违反安全政策。'), '');
+  assert.match(
+    normalizeFinalPromptOutput('Cinematic two-shot of one male traveler and one young East Asian woman beside a campfire.'),
+    /one male traveler and one young East Asian woman/,
+  );
 });
