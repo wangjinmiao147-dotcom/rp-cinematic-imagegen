@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.13
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.14
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -1443,7 +1443,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.13</span>
+            <span class="rpig-header-version">v2.9.14</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2142,9 +2142,14 @@ function buildSettingsUI() {
 function buildFloatingUI() {
     const fab = $(`<div class="rpig-fab" title="🎬 RP 电影配图 · 点击展开/收起 · 按住可拖拽">🎬</div>`);
 
+    const mobileActions = $(`<div class="rpig-mobile-actions" aria-label="RP 电影配图快捷操作">
+        <button type="button" class="menu_button rpig-mobile-gen-now" title="立即为最新一条 AI 消息生成配图">🎬 出图</button>
+        <button type="button" class="menu_button rpig-mobile-open-panel" title="打开 RP 电影配图控制面板">⚙ 面板</button>
+    </div>`);
+
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.13</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.14</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2217,7 +2222,7 @@ function buildFloatingUI() {
         </div>
     </div>`);
 
-    $('body').append(fab).append(panel);
+    $('body').append(fab).append(panel).append(mobileActions);
     updateGenerationQueueUI();
 
     function refreshStatus() {
@@ -2383,8 +2388,7 @@ function buildFloatingUI() {
         if (moved) panelCustomPositioned = true;
     });
 
-    fab.on('click', function () {
-        if (fabDrag.hasMoved()) return;
+    function toggleFloatingPanel() {
         if (panel.is(':visible')) {
             panel.hide();
         } else {
@@ -2392,7 +2396,14 @@ function buildFloatingUI() {
             refreshStatus();
             panel.show();
         }
+    }
+
+    fab.on('click', function () {
+        if (fabDrag.hasMoved()) return;
+        toggleFloatingPanel();
     });
+
+    mobileActions.find('.rpig-mobile-open-panel').on('click', toggleFloatingPanel);
 
     panel.find('.rpig-fab-header-close').on('click', () => {
         panel.hide();
@@ -2401,7 +2412,7 @@ function buildFloatingUI() {
     // 点击外部区域自动收起，避免遮挡聊天文本
     $(document).on('mousedown.rpigOutside touchstart.rpigOutside', function (e) {
         if (!panel.is(':visible')) return;
-        if (!$(e.target).closest('.rpig-fab-panel, .rpig-fab, .rpig-gallery-overlay, .rpig-lightbox').length) {
+        if (!$(e.target).closest('.rpig-fab-panel, .rpig-fab, .rpig-mobile-actions, .rpig-gallery-overlay, .rpig-lightbox').length) {
             panel.hide();
         }
     });
@@ -2481,7 +2492,7 @@ function buildFloatingUI() {
         refreshStatus();
     });
 
-    $('#rpig-gen-now').on('click', async function () {
+    async function generateLatestAssistantMessage() {
         const liveContext = getContext();
         const chat = liveContext?.chat || [];
         const latestIdx = findLatestAssistantMessageIndex(chat);
@@ -2491,7 +2502,10 @@ function buildFloatingUI() {
         } else {
             toastr.warning('未在当前会话中找到可生成配图的 AI 消息');
         }
-    });
+    }
+
+    $('#rpig-gen-now').on('click', generateLatestAssistantMessage);
+    mobileActions.find('.rpig-mobile-gen-now').on('click', generateLatestAssistantMessage);
 
     $('#rpig-cancel-current').on('click', cancelCurrentGeneration);
     $('#rpig-clear-queue').on('click', clearQueuedGenerations);
@@ -2532,7 +2546,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.13</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.14</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2616,5 +2630,5 @@ jQuery(async function () {
     try { mountSettingsPanel(); } catch { /* ignore */ }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.13] 最终提示词预览与可取消任务队列已启用。');
+    console.log('[RP 电影配图 v2.9.14] 移动端快捷出图、最终提示词预览与可取消任务队列已启用。');
 });
