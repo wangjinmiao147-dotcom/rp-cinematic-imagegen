@@ -2,7 +2,7 @@
 
 面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的电影级角色扮演配图扩展。它会根据当前剧情、在场人物与角色参考图，生成剧照抓拍、表情特写、三视图或全身立绘，并把结果保存在当前聊天与角色图库中。
 
-当前版本：**v2.9.11**
+当前版本：**v2.9.12**
 已验证环境：**SillyTavern 1.18.0**
 
 ## 功能
@@ -19,7 +19,18 @@
 
 ## 安装
 
-### 从 Git 仓库安装（推荐）
+### 酒馆助手 JSON 一键安装（最省事）
+
+前提：已经安装“酒馆助手（JS-Slash-Runner）”。
+
+1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.12.json`。
+2. 打开“酒馆助手” → “脚本库”，导入 JSON，并选择“全局脚本”。
+3. 打开导入脚本的启用开关。首次启用会自动从本仓库安装扩展并刷新页面。
+4. 以后需要更新时，点击脚本按钮“安装 / 更新 RP 电影配图”。
+
+> 酒馆助手会把所有新导入脚本默认设为关闭，因此首次导入后的“启用”步骤无法省略。JSON 只是安全的一键安装/更新器，实际运行的仍是本仓库中的完整原生扩展。
+
+### 从 Git 仓库安装
 
 1. 打开 SillyTavern。
 2. 进入“扩展” → “安装扩展”。
@@ -30,7 +41,7 @@
 
 ### 使用 ZIP 手动安装
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.11.zip`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.12.zip`。
 2. 解压后得到 `rp-cinematic-imagegen` 文件夹。
 3. 把该文件夹复制到：
 
@@ -90,7 +101,7 @@ npm run build
 ```
 
 - `npm run check`：检查 JavaScript 语法、清单版本、相对导入、敏感信息和不应发布的文件。
-- `npm run build`：先校验，再在 `dist/` 生成酒馆手动安装 ZIP 和 SHA-256 校验文件。
+- `npm run build`：先校验，再在 `dist/` 生成酒馆手动安装 ZIP、酒馆助手安装器 JSON 和对应 SHA-256 校验文件。
 - 推送 `v*` 标签时，GitHub Actions 会自动校验并创建对应 Release。
 - 社区投稿步骤与 `extensions.json` 条目模板见 [`docs/COMMUNITY_RELEASE.md`](docs/COMMUNITY_RELEASE.md)。
 

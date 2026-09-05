@@ -10,6 +10,7 @@ const read = (relativePath) => readFileSync(join(root, relativePath), 'utf8');
 
 const manifest = JSON.parse(read('manifest.json'));
 const pkg = JSON.parse(read('package.json'));
+const installerPath = 'installers/rp-cinematic-imagegen-tavern-helper-installer.json';
 
 for (const field of ['display_name', 'loading_order', 'requires', 'optional', 'js', 'css', 'author', 'version', 'description']) {
     if (manifest[field] === undefined || manifest[field] === null || manifest[field] === '') {
@@ -36,6 +37,26 @@ if (!manifest.homePage) {
 const runtimeFiles = [manifest.js, manifest.css, 'manifest.json'];
 for (const file of runtimeFiles) {
     if (!existsSync(join(root, file))) errors.push(`运行文件不存在：${file}`);
+}
+
+if (!existsSync(join(root, installerPath))) {
+    errors.push(`酒馆助手安装器不存在：${installerPath}`);
+} else {
+    try {
+        const installer = JSON.parse(read(installerPath));
+        if (installer.type !== 'script' || installer.enabled !== false) {
+            errors.push('酒馆助手安装器必须是默认关闭的 script JSON');
+        }
+        if (!installer.content?.includes(pkg.repository.url.replace(/\.git$/, ''))) {
+            errors.push('酒馆助手安装器未指向 package.json 中的公开仓库');
+        }
+        if (!installer.button?.buttons?.some(button => button.visible && button.name)) {
+            errors.push('酒馆助手安装器缺少可见的安装/更新按钮');
+        }
+        new Function(installer.content);
+    } catch (error) {
+        errors.push(`酒馆助手安装器格式或脚本语法无效：${error.message}`);
+    }
 }
 
 const sourceFiles = [manifest.js, ...readdirSync(join(root, 'src'))
@@ -86,7 +107,7 @@ const secretPatterns = [
     ['Windows 绝对路径', /[A-Za-z]:\\(?:Users|Documents|Desktop|酒馆|deepseek桌面)\\/g],
 ];
 
-for (const file of [...sourceFiles, manifest.css, 'manifest.json']) {
+for (const file of [...sourceFiles, manifest.css, 'manifest.json', installerPath]) {
     const content = read(file);
     for (const [label, pattern] of secretPatterns) {
         pattern.lastIndex = 0;

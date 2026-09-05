@@ -1,0 +1,22 @@
+{
+  "type": "script",
+  "enabled": false,
+  "name": "RP 电影配图 · 一键安装/更新",
+  "id": "8fe77e53-2b1a-4d7c-9e50-82f9df0f81c1",
+  "content": "const REPOSITORY_URL = 'https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen';\nconst EXTENSION_ID = 'rp-cinematic-imagegen';\nconst LEGACY_EXTENSION_ID = 'rp-cinematic-v2';\nconst BUTTON_NAME = '安装 / 更新 RP 电影配图';\nlet operationInProgress = false;\n\nasync function responseMessage(response) {\n  try {\n    const data = await response.clone().json();\n    return data?.message || JSON.stringify(data);\n  } catch {\n    try {\n      return await response.text();\n    } catch {\n      return '';\n    }\n  }\n}\n\nfunction reloadAfterSuccess(message) {\n  toastr.success(`${message}，即将刷新酒馆页面…`);\n  setTimeout(() => triggerSlash('/reload-page'), 1800);\n}\n\nasync function installOrUpdate({ automatic = false } = {}) {\n  if (operationInProgress) {\n    if (!automatic) toastr.info('安装或更新正在进行，请稍候。');\n    return;\n  }\n\n  operationInProgress = true;\n  try {\n    if (isInstalledExtension(EXTENSION_ID)) {\n      if (automatic) {\n        toastr.success('RP 电影配图已经安装；以后可用脚本按钮检查更新。');\n        return;\n      }\n\n      toastr.info('正在检查并更新 RP 电影配图…');\n      const response = await updateExtension(EXTENSION_ID);\n      if (!response.ok) {\n        throw new Error((await responseMessage(response)) || `HTTP ${response.status}`);\n      }\n      reloadAfterSuccess('RP 电影配图更新完成');\n      return;\n    }\n\n    if (isInstalledExtension(LEGACY_EXTENSION_ID)) {\n      toastr.warning('检测到旧目录 rp-cinematic-v2。为避免重复加载，请先在酒馆扩展管理中停用或删除旧版，再点击本脚本按钮安装正式版。');\n      return;\n    }\n\n    toastr.info('正在从 GitHub 安装 RP 电影配图…');\n    const response = await installExtension(REPOSITORY_URL, 'local');\n    if (!response.ok) {\n      throw new Error((await responseMessage(response)) || `HTTP ${response.status}`);\n    }\n    reloadAfterSuccess('RP 电影配图安装完成');\n  } catch (error) {\n    console.error('[RP 电影配图安装器]', error);\n    toastr.error(`RP 电影配图安装/更新失败：${error?.message || error}`);\n  } finally {\n    operationInProgress = false;\n  }\n}\n\neventOn(getButtonEvent(BUTTON_NAME), () => void installOrUpdate());\nvoid installOrUpdate({ automatic: true });",
+  "info": "用于酒馆助手的一键安装/更新脚本。导入时请选择“全局脚本”，然后开启此脚本；首次开启会从官方 GitHub 仓库安装 RP 电影配图并自动刷新。安装完成后，脚本按钮可用于检查更新。此 JSON 不包含 API Key、用户设置、聊天记录、角色卡或生成图片。需要已安装酒馆助手（JS-Slash-Runner），且 SillyTavern 能访问 GitHub。",
+  "button": {
+    "enabled": true,
+    "buttons": [
+      {
+        "name": "安装 / 更新 RP 电影配图",
+        "visible": true
+      }
+    ]
+  },
+  "data": {},
+  "export_with": {
+    "data": true,
+    "button": true
+  }
+}
