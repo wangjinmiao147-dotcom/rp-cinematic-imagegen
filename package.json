@@ -1,0 +1,20 @@
+{
+  "name": "sillytavern-rp-cinematic-imagegen",
+  "version": "2.9.8",
+  "private": true,
+  "description": "SillyTavern 电影级角色扮演配图扩展",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen.git"
+  },
+  "scripts": {
+    "check": "node scripts/check-release.mjs",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+    "prepare:repo": "node scripts/prepare-github.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

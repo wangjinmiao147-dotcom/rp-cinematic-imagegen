@@ -1,0 +1,7 @@
+{
+  "id": "rp-cinematic-imagegen",
+  "type": "extension",
+  "name": "RP 电影配图",
+  "description": "根据剧情、在场人物和角色参考图生成电影剧照、表情特写与角色设计图。",
+  "url": "https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen"
+}

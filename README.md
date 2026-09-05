@@ -1,0 +1,105 @@
+# 🎬 RP 电影配图
+
+面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的电影级角色扮演配图扩展。它会根据当前剧情、在场人物与角色参考图，生成剧照抓拍、表情特写、三视图或全身立绘，并把结果保存在当前聊天与角色图库中。
+
+当前版本：**v2.9.8**  
+已验证环境：**SillyTavern 1.18.0**
+
+## 功能
+
+- 双镜头模式：剧情剧照抓拍与角色微表情特写。
+- 上帝视角人物调度：分析当前场景的所有在场角色，减少漏人、重复人物和错误单人构图。
+- 自动剧情检测：仅在剧情事件或场景发生变化时自动出图。
+- 角色一致性：角色卡原图作为身份锚点，上一张剧情图用于服装、道具和场景连续性。
+- 角色图库：聚合消息配图、参考图和归档图片，支持查看、下载与删除。
+- 多种图片后端：OpenAI 兼容接口、Google Gemini、Stable Diffusion WebUI、ComfyUI，以及酒馆内置 SD 命令。
+- 独立或复用剧情 LLM：可复用酒馆当前模型，也可配置 OpenAI 兼容的独立接口。
+
+## 安装
+
+### 从 Git 仓库安装（推荐）
+
+1. 打开 SillyTavern。
+2. 进入“扩展” → “安装扩展”。
+3. 粘贴本仓库的 Git URL。
+4. 安装完成后刷新页面，在扩展列表中启用“RP 电影配图”。
+
+> 发布者：首次上传 GitHub 后运行 `npm run prepare:repo -- --repository-url https://github.com/用户名/仓库名`，自动补齐仓库地址。仓库 URL 确定前，相关字段有意留空。
+
+### 使用 ZIP 手动安装
+
+1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.8.zip`。
+2. 解压后得到 `rp-cinematic-imagegen` 文件夹。
+3. 把该文件夹复制到：
+
+   ```text
+   <SillyTavern 根目录>/data/default-user/extensions/
+   ```
+
+4. 刷新 SillyTavern 页面并启用扩展。
+
+## 配置
+
+### 图片后端
+
+- **OpenAI 兼容**：填写 API 根地址、API Key 和图片模型。支持 `/images/generations`，并会在可用时使用 `/images/edits` 做参考图编辑。
+- **Google Gemini**：默认 API 根地址为 `https://generativelanguage.googleapis.com/v1`，密钥通过 `x-goog-api-key` 请求头发送。
+- **SD WebUI**：填写本地地址，例如 `http://127.0.0.1:7860`；WebUI 启动时需启用 API。
+- **ComfyUI**：填写本地地址并提供 API 格式的 Workflow JSON。
+- **酒馆内置 SD**：复用 SillyTavern 已配置的图片生成命令。
+
+### 剧情分析
+
+- 推荐选择“复用酒馆当前 LLM”，无需重复填写文本模型密钥。
+- 也可以配置独立的 OpenAI 兼容 LLM 地址、API Key 和模型。
+- 自动检测默认按消息冷却，避免每条回复都触发图片与 LLM 请求。
+
+### 连续性与锁脸
+
+- 角色卡原图优先用于面部身份锚定。
+- 上一张剧情图用于保持未改变的服装、发型、配饰与持续道具。
+- 场景改变时，新对话中的地点、时间、天气和光源优先于旧图背景。
+- SD 连续性强度越低越接近上一张图，越高越容易改变动作与场景。
+
+## 使用
+
+- 点击 AI 消息操作栏中的 🎬 按钮生成配图。
+- 悬浮或长按按钮，选择“剧照抓拍”或“表情特写”。
+- 点击悬浮球打开工作台，可切换视角、镜头、自动生成和角色参考图。
+- 点击 📚 打开当前角色图库。
+- 点击聊天中的配图进入灯箱预览，按 `Esc` 关闭。
+
+## 隐私与密钥
+
+- 本仓库和发布 ZIP **不包含任何预设 API Key、用户设置、聊天记录、角色卡或生成图片**。
+- 你在界面中填写的密钥由 SillyTavern 的扩展设置保存，并仅用于请求你选择的接口地址。
+- 使用第三方中转接口前，请自行核对服务商的隐私政策、日志策略与计费规则。
+- 发布前可运行 `npm run check`；校验器会检查常见密钥格式、绝对路径、备份文件和发布清单。
+
+## 开发与发布
+
+需要 Node.js 18+；项目没有第三方 npm 依赖。
+
+```powershell
+npm run check
+npm run build
+```
+
+- `npm run check`：检查 JavaScript 语法、清单版本、相对导入、敏感信息和不应发布的文件。
+- `npm run build`：先校验，再在 `dist/` 生成酒馆手动安装 ZIP 和 SHA-256 校验文件。
+- 推送 `v*` 标签时，GitHub Actions 会自动校验并创建对应 Release。
+- 社区投稿步骤与 `extensions.json` 条目模板见 [`docs/COMMUNITY_RELEASE.md`](docs/COMMUNITY_RELEASE.md)。
+
+## 兼容性说明
+
+- 这是纯前端 SillyTavern 扩展，不要求启用服务器插件。
+- 由于浏览器跨域策略，部分远程或局域网图片后端可能需要自行正确配置 CORS。
+- AI 图片模型无法保证每次都生成完全正确的手部、肢体和人物数量；复杂多人场景建议优先使用中景或剧照模式。
+
+## 贡献与安全
+
+提交代码前请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)。安全问题请按 [`SECURITY.md`](SECURITY.md) 中的方式处理，不要在公开 Issue 中粘贴 API Key。
+
+## 许可证
+
+[MIT License](LICENSE)

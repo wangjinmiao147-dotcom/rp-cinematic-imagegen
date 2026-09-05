@@ -1,0 +1,13 @@
+{
+  "display_name": "RP 电影配图",
+  "loading_order": 10,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "DeepSeek",
+  "version": "2.9.8",
+  "homePage": "https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen",
+  "auto_update": true,
+  "description": "现代深色电影工作台：双镜头分镜、上帝视角全员调度、原图锁脸与全源图库"
+}
