@@ -27,3 +27,13 @@ test('Tavern Helper installer targets the public repository and has valid JavaSc
   assert.match(installer.content, /getButtonEvent\(BUTTON_NAME\)/);
   assert.doesNotThrow(() => new Function(installer.content));
 });
+
+test('Tavern Helper installer migrates the legacy directory only after the full version installs', async () => {
+  const installer = JSON.parse(await readFile(installerPath, 'utf8'));
+  const installIndex = installer.content.indexOf("installExtension(REPOSITORY_URL, 'local')");
+  const uninstallIndex = installer.content.indexOf('uninstallExtension(LEGACY_EXTENSION_ID)');
+
+  assert.ok(installIndex >= 0, 'installer must install the full GitHub extension');
+  assert.ok(uninstallIndex > installIndex, 'legacy removal must happen only after the full install succeeds');
+  assert.match(installer.content, /完整正式版/);
+});
