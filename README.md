@@ -2,7 +2,7 @@
 
 面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的电影级角色扮演配图扩展。它会根据当前剧情、在场人物与角色参考图，生成剧照抓拍、表情特写、三视图或全身立绘，并把结果保存在当前聊天与角色图库中。
 
-当前版本：**v2.9.12**
+当前版本：**v2.9.13**
 已验证环境：**SillyTavern 1.18.0**
 
 ## 功能
@@ -23,7 +23,7 @@
 
 前提：已经安装“酒馆助手（JS-Slash-Runner）”。
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.12.json`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.13.json`。
 2. 打开“酒馆助手” → “脚本库”，导入 JSON，并选择“全局脚本”。
 3. 打开导入脚本的启用开关。首次启用会自动从本仓库安装扩展并刷新页面。
 4. 以后需要更新时，点击脚本按钮“安装 / 更新 RP 电影配图”。
@@ -41,7 +41,7 @@
 
 ### 使用 ZIP 手动安装
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.12.zip`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.13.zip`。
 2. 解压后得到 `rp-cinematic-imagegen` 文件夹。
 3. 把该文件夹复制到：
 

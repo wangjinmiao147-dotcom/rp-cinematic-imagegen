@@ -16,7 +16,7 @@ npm run check
 ```powershell
 git init -b main
 git add .
-git commit -m "Release v2.9.12"
+git commit -m "Release v2.9.13"
 git remote add origin https://github.com/你的用户名/rp-cinematic-imagegen.git
 git push -u origin main
 ```
@@ -26,13 +26,13 @@ git push -u origin main
 ## 3. 创建 Release
 
 ```powershell
-git tag v2.9.12
-git push origin v2.9.12
+git tag v2.9.13
+git push origin v2.9.13
 ```
 
 GitHub Actions 会运行发布校验、生成 ZIP 与 SHA-256，并创建 GitHub Release。
 
-Release 会同时提供 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.12.json`。在 Discord 等社区分享时，可直接上传这个 JSON，并注明：“酒馆助手 → 脚本库 → 导入为全局脚本 → 启用”；首次启用会自动安装完整扩展。
+Release 会同时提供 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.13.json`。在 Discord 等社区分享时，可直接上传这个 JSON，并注明：“酒馆助手 → 脚本库 → 导入为全局脚本 → 启用”；首次启用会自动安装完整扩展。
 
 ## 4. 验证酒馆安装
 
