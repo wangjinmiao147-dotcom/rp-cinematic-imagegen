@@ -2,7 +2,15 @@
 // RP 电影配图 - LLM 调用模块
 // ============================================================
 
-import { normalizeBackendUrl, scrubSensitiveText } from './utils.js';
+import {
+    combineAbortSignals,
+    isAbortError,
+    normalizeBackendUrl,
+    raceWithAbort,
+    scrubSensitiveText,
+    throwIfAborted,
+    timeoutSignal,
+} from './utils.js';
 
 /**
  * 统一 LLM 调用
@@ -12,8 +20,10 @@ import { normalizeBackendUrl, scrubSensitiveText } from './utils.js';
  * @param {Function} [getContextFn] 
  * @returns {Promise<string>}
  */
-export async function callLLM(system, user, settings, getContextFn) {
+export async function callLLM(system, user, settings, getContextFn, options = {}) {
     const s = settings || {};
+    const signal = options.signal;
+    throwIfAborted(signal);
     const context = typeof getContextFn === 'function' ? getContextFn() : null;
 
     if (s.llmSource === 'tavern') {
@@ -23,11 +33,11 @@ export async function callLLM(system, user, settings, getContextFn) {
 
         if (typeof quietGen === 'function') {
             const fullPrompt = `${system}\n\n${user}`;
-            const result = await quietGen({
+            const result = await raceWithAbort(quietGen({
                 quietPrompt: fullPrompt,
                 quietToLoud: false,
                 skipWIAN: false,
-            });
+            }), signal);
 
             if (typeof result === 'string' && result.trim()) {
                 return result.trim();
@@ -73,9 +83,10 @@ export async function callLLM(system, user, settings, getContextFn) {
                 messages: messages,
                 temperature: 0.7,
             }),
-            signal: AbortSignal.timeout(120000),
+            signal: combineAbortSignals(signal, timeoutSignal(120000)),
         });
     } catch (netErr) {
+        if (isAbortError(netErr)) throw netErr;
         throw new Error(`LLM 连接失败：${scrubSensitiveText(netErr.message, [key])}`);
     }
 

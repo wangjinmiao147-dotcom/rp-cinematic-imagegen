@@ -7,7 +7,12 @@ import {
     scrubSensitiveText,
     dataUrlToBlob,
     fetchToDataUrl,
+    combineAbortSignals,
+    isAbortError,
+    raceWithAbort,
     sleep,
+    throwIfAborted,
+    timeoutSignal,
 } from './utils.js';
 import { DEFAULT_SD_NEGATIVE, preparePromptForBackend } from './prompts.js';
 
@@ -34,12 +39,13 @@ export const SIZE_MAP = {
  * @param {number} [maxRefs] 
  * @returns {Promise<Array>}
  */
-export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, maxRefs = 5) {
+export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, maxRefs = 5, signal) {
     if (!Array.isArray(refs) || refs.length === 0) return [];
     const hydrated = [];
     const seen = new Set();
 
     for (const ref of refs) {
+        throwIfAborted(signal);
         if (!ref) continue;
         if (hydrated.length >= maxRefs) break;
 
@@ -47,9 +53,10 @@ export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, max
         if (!dataUrl && ref.url) {
             try {
                 if (typeof fetchFn === 'function') {
-                    dataUrl = await fetchFn(ref.url);
+                    dataUrl = await fetchFn(ref.url, { signal });
                 }
             } catch (err) {
+                if (isAbortError(err)) throw err;
                 console.warn('[RP 电影配图] 参考图水合转换失败:', ref.url, err);
             }
         }
@@ -74,7 +81,8 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
     const onWarning = options.onWarning || (() => {});
     const fetchFn = options.fetchToDataUrl || fetchToDataUrl;
 
-    const hydratedRefs = await hydrateReferenceImages(refs, fetchFn);
+    throwIfAborted(options.signal);
+    const hydratedRefs = await hydrateReferenceImages(refs, fetchFn, 5, options.signal);
     const prepared = preparePromptForBackend(s, prompt, avoid, options);
 
     let result;
@@ -89,7 +97,7 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
             result = await generateComfyUIImage(s, prepared.prompt, prepared.avoid, hydratedRefs, options);
             break;
         case BACKENDS.TAVERN_SD:
-            result = await generateTavernSD(prepared.prompt, options.slashCommandParser);
+            result = await generateTavernSD(prepared.prompt, options.slashCommandParser, options);
             break;
         case BACKENDS.OPENAI:
         default:
@@ -148,7 +156,7 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
                     method: 'POST',
                     headers: headers,
                     body: buildEditForm(highFidelity),
-                    signal: AbortSignal.timeout(300000),
+                    signal: combineAbortSignals(options.signal, timeoutSignal(300000)),
                 });
 
                 // 连续性模式优先请求高输入保真；第三方不识别该字段时自动重试标准 edits。
@@ -188,6 +196,7 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
                 }
                 onWarning(`参考图生图失败（HTTP ${errStatus}），已自动降级为纯文本提示词生成`);
             } catch (editErr) {
+                if (isAbortError(editErr)) throw editErr;
                 if (editErr.message && /OpenAI Edits HTTP (?:401|403|429)/.test(editErr.message)) {
                     throw editErr;
                 }
@@ -215,9 +224,10 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
             method: 'POST',
             headers: jsonHeaders,
             body: JSON.stringify(body),
-            signal: AbortSignal.timeout(300000),
+            signal: combineAbortSignals(options.signal, timeoutSignal(300000)),
         });
     } catch (netErr) {
+        if (isAbortError(netErr)) throw netErr;
         throw new Error(`网络连接失败：${scrubSensitiveText(netErr.message, [key])}`);
     }
 
@@ -307,9 +317,10 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
             method: 'POST',
             headers: headers,
             body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(300000),
+            signal: combineAbortSignals(options.signal, timeoutSignal(300000)),
         });
     } catch (netErr) {
+        if (isAbortError(netErr)) throw netErr;
         throw new Error(`Gemini 连接失败：${scrubSensitiveText(netErr.message, [key])}`);
     }
 
@@ -366,14 +377,14 @@ export async function generateSDImage(settings, prompt, avoid, sdSize, refs, opt
                 init_images: [refs[0].dataUrl],
                 denoising_strength: denoising,
             }),
-            signal: AbortSignal.timeout(300000),
+            signal: combineAbortSignals(options.signal, timeoutSignal(300000)),
         });
     } else {
         res = await fetch(`${base}/sdapi/v1/txt2img`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(common),
-            signal: AbortSignal.timeout(300000),
+            signal: combineAbortSignals(options.signal, timeoutSignal(300000)),
         });
     }
 
@@ -424,13 +435,16 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
                 const res = await fetch(`${base}/upload/image`, {
                     method: 'POST',
                     body: form,
-                    signal: AbortSignal.timeout(30000),
+                    signal: combineAbortSignals(options.signal, timeoutSignal(30000)),
                 });
                 if (res.ok) {
                     const data = await res.json();
                     if (data?.name) uploadedNames.push(data.name);
                 }
-            } catch { /* ignore single ref upload fail */ }
+            } catch (error) {
+                if (isAbortError(error)) throw error;
+                /* ignore single ref upload fail */
+            }
         }
     }
 
@@ -535,7 +549,7 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: workflow }),
-        signal: AbortSignal.timeout(30000),
+        signal: combineAbortSignals(options.signal, timeoutSignal(30000)),
     });
 
     if (!res.ok) {
@@ -549,11 +563,16 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
 
     // 5. 轮询历史结果
     for (let i = 0; i < 120; i++) {
-        await sleep(2500);
+        await sleep(2500, options.signal);
         let hres;
         try {
-            hres = await fetch(`${base}/history/${promptId}`, { signal: AbortSignal.timeout(10000) });
-        } catch { continue; }
+            hres = await fetch(`${base}/history/${promptId}`, {
+                signal: combineAbortSignals(options.signal, timeoutSignal(10000)),
+            });
+        } catch (error) {
+            if (isAbortError(error) && options.signal?.aborted) throw error;
+            continue;
+        }
         if (!hres.ok) continue;
 
         const hist = await hres.json();
@@ -565,7 +584,11 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
             if (out.images && out.images.length) {
                 const img = out.images[0];
                 const imgUrl = `${base}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder || '')}&type=${encodeURIComponent(img.type || 'output')}`;
-                return { dataUrl: await fetchToDataUrl(imgUrl), model: 'ComfyUI', usedRefs: appliedReference };
+                return {
+                    dataUrl: await fetchToDataUrl(imgUrl, { signal: options.signal }),
+                    model: 'ComfyUI',
+                    usedRefs: appliedReference,
+                };
             }
         }
     }
@@ -575,12 +598,15 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
 /**
  * SillyTavern 内置 SD 命令
  */
-export async function generateTavernSD(prompt, slashCommandParser) {
+export async function generateTavernSD(prompt, slashCommandParser, options = {}) {
     const parser = slashCommandParser || (typeof window !== 'undefined' ? window.SlashCommandParser : null);
     if (!parser?.commands?.['sd']) {
         throw new Error('酒馆未启用内置 sd 命令，请先在 酒馆扩展→图像生成 中配置好生图 API');
     }
-    const result = await parser.commands['sd'].callback({ quiet: 'true' }, prompt);
+    const result = await raceWithAbort(
+        parser.commands['sd'].callback({ quiet: 'true' }, prompt),
+        options.signal,
+    );
     if (typeof result !== 'string' || !result.trim()) {
         throw new Error('酒馆 sd 命令未返回图片');
     }

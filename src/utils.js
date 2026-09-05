@@ -168,8 +168,86 @@ export function dataUrlToBlob(dataUrl) {
  * @param {number} [timeoutMs=30000] 
  * @returns {Promise<string>}
  */
-export async function fetchToDataUrl(url, timeoutMs = 30000) {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+export function createAbortError(message = '任务已取消') {
+    try {
+        return new DOMException(message, 'AbortError');
+    } catch {
+        const error = new Error(message);
+        error.name = 'AbortError';
+        return error;
+    }
+}
+
+export function isAbortError(error) {
+    return error?.name === 'AbortError' || /任务已取消|aborted|aborterror/i.test(error?.message || '');
+}
+
+export function throwIfAborted(signal) {
+    if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : createAbortError();
+    }
+}
+
+export function timeoutSignal(ms) {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        return AbortSignal.timeout(ms);
+    }
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(createAbortError('请求超时')), ms);
+    return controller.signal;
+}
+
+export function combineAbortSignals(...signals) {
+    const validSignals = signals.filter(Boolean);
+    if (validSignals.length === 0) return undefined;
+    if (validSignals.length === 1) return validSignals[0];
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+        return AbortSignal.any(validSignals);
+    }
+
+    const controller = new AbortController();
+    for (const signal of validSignals) {
+        if (signal.aborted) {
+            controller.abort(signal.reason);
+            break;
+        }
+        signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+    }
+    return controller.signal;
+}
+
+export function raceWithAbort(promise, signal) {
+    if (!signal) return Promise.resolve(promise);
+    throwIfAborted(signal);
+    return new Promise((resolve, reject) => {
+        const onAbort = () => reject(signal.reason instanceof Error ? signal.reason : createAbortError());
+        signal.addEventListener('abort', onAbort, { once: true });
+        Promise.resolve(promise).then(
+            value => {
+                signal.removeEventListener('abort', onAbort);
+                resolve(value);
+            },
+            error => {
+                signal.removeEventListener('abort', onAbort);
+                reject(error);
+            },
+        );
+    });
+}
+
+/**
+ * 请求网络 URL 并转换为 Data URL
+ * @param {string} url
+ * @param {number|object} [timeoutOrOptions=30000]
+ * @returns {Promise<string>}
+ */
+export async function fetchToDataUrl(url, timeoutOrOptions = 30000) {
+    const options = typeof timeoutOrOptions === 'object' && timeoutOrOptions !== null
+        ? timeoutOrOptions
+        : { timeoutMs: timeoutOrOptions };
+    const timeoutMs = Number(options.timeoutMs) || 30000;
+    const signal = combineAbortSignals(options.signal, timeoutSignal(timeoutMs));
+    const res = await fetch(url, { signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const blob = await res.blob();
     return await blobToDataUrl(blob);
@@ -180,8 +258,20 @@ export async function fetchToDataUrl(url, timeoutMs = 30000) {
  * @param {number} ms 
  * @returns {Promise<void>}
  */
-export function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+export function sleep(ms, signal) {
+    if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+    throwIfAborted(signal);
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal.reason instanceof Error ? signal.reason : createAbortError());
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
 }
 
 /**

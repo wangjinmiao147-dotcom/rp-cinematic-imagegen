@@ -1,5 +1,5 @@
 /* ============================================================
-   RP 电影配图 (rp-cinematic-imagegen) — v2.9.8
+   RP 电影配图 (rp-cinematic-imagegen) — v2.9.9
    现代深色电影工作台规范 · 纯原生 CSS · 响应式双栏与微交互
    ============================================================ */
 
@@ -462,6 +462,175 @@
   align-items: center;
   gap: 7px;
   line-height: 1.4;
+}
+
+.rpig-taskbar {
+  padding: 8px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  border-radius: var(--rpig-radius-sm);
+  background: rgba(251, 191, 36, 0.08);
+  color: var(--rpig-text-title);
+  font-size: 11px;
+}
+
+.rpig-task-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.rpig-task-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.rpig-queued-task {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.rpig-cancel-queued {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 4px;
+  background: rgba(248, 113, 113, 0.1);
+  color: #fca5a5;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.rpig-task-actions .menu_button {
+  min-height: 28px;
+  font-size: 11px;
+}
+
+.rpig-task-actions .menu_button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.rpig-prompt-review-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(6, 8, 14, 0.82);
+  backdrop-filter: blur(9px);
+  -webkit-backdrop-filter: blur(9px);
+}
+
+.rpig-prompt-review-dialog {
+  width: min(760px, 96vw);
+  max-height: 92vh;
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid rgba(139, 122, 232, 0.42);
+  border-radius: var(--rpig-radius-lg);
+  background: linear-gradient(160deg, rgba(24, 27, 42, 0.99), rgba(13, 16, 27, 0.99));
+  color: var(--rpig-text-title);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58);
+}
+
+.rpig-prompt-review-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 17px;
+}
+
+.rpig-prompt-review-header small {
+  display: block;
+  margin-top: 3px;
+  color: var(--rpig-text-muted);
+  font-size: 11px;
+}
+
+.rpig-prompt-review-close {
+  border: 0;
+  background: transparent;
+  color: var(--rpig-text-muted);
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.rpig-prompt-review-note {
+  margin-bottom: 13px;
+  padding: 9px 11px;
+  border: 1px solid rgba(52, 211, 153, 0.24);
+  border-radius: var(--rpig-radius-sm);
+  background: rgba(52, 211, 153, 0.07);
+  color: var(--rpig-accent-green);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.rpig-prompt-review-dialog label {
+  display: block;
+  margin-top: 11px;
+  color: var(--rpig-text-title);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rpig-prompt-review-dialog textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 92px;
+  margin-top: 6px;
+  padding: 10px 11px;
+  resize: vertical;
+  border: 1px solid rgba(139, 122, 232, 0.3);
+  border-radius: var(--rpig-radius-sm);
+  background: rgba(6, 9, 17, 0.82);
+  color: var(--rpig-text-title);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.rpig-review-counter {
+  margin-top: 3px;
+  text-align: right;
+  color: var(--rpig-text-muted);
+  font-size: 10px;
+}
+
+.rpig-prompt-review-meta {
+  margin-top: 12px;
+  padding: 9px 11px;
+  border-radius: var(--rpig-radius-sm);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--rpig-text-muted);
+  font-size: 11px;
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.rpig-prompt-review-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 15px;
+}
+
+@media (max-width: 600px) {
+  .rpig-prompt-review-overlay { padding: 8px; }
+  .rpig-prompt-review-dialog { padding: 13px; max-height: 96vh; }
+  .rpig-prompt-review-actions .menu_button { flex: 1 1 100%; }
 }
 
 .rpig-fab-btns {

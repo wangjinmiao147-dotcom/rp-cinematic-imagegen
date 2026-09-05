@@ -20,6 +20,8 @@ jobs:
           node-version: 20
       - name: Validate source
         run: npm run check
+      - name: Test cancellation paths
+        run: npm test
       - name: Build SillyTavern package
         run: npm run build
       - name: Upload build artifact

@@ -209,6 +209,7 @@ export async function executeAutoDetection({
             await generateForMessageFn(messageIndex, prompt, settings.shotMode, avoid, {
                 sceneAnchor,
                 sceneChanged: parsed.scene_changed === true,
+                automatic: true,
             });
         }
     } catch (err) {

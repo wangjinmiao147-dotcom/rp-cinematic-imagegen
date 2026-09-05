@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.8
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.9
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -25,6 +25,9 @@ import {
     scrubSensitiveText,
     findLatestAssistantMessageIndex,
     mergeNegativePrompts,
+    createAbortError,
+    isAbortError,
+    throwIfAborted,
 } from './src/utils.js';
 
 import {
@@ -102,6 +105,7 @@ const defaultSettings = {
     autoMode: false,
     autoCooldown: 3,     // 至少间隔 N 条消息才再次检测
     autoWindow: 12,      // 分析最近 N 条消息
+    previewBeforeGeneration: true, // 手动生成时预览并可编辑最终提示词
     // LLM（剧情检测与配图提示词生成）
     llmSource: 'tavern', // tavern=复用酒馆当前LLM, custom=扩展内独立配置
     llmUrl: '',
@@ -508,7 +512,9 @@ async function openGallery(characterOrId) {
 }
 
 let rpigGenerating = false;
-let rpigGenDepth = 0;
+let rpigActiveTask = null;
+let rpigTaskSequence = 0;
+const rpigGenerationQueue = [];
 
 function setGenStatus(phase, text) {
     const fab = $('.rpig-fab');
@@ -531,15 +537,197 @@ function setGenStatus(phase, text) {
     }
 }
 
-async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, presetAvoid, generationMeta = {}) {
-    rpigGenDepth++;
-    if (rpigGenerating || rpigGenDepth > 2) {
-        rpigGenDepth--;
-        return;
-    }
-    rpigGenerating = true;
+function updateGenerationQueueUI() {
+    const taskbar = $('#rpig-taskbar');
+    const summary = $('#rpig-task-summary');
+    const taskList = $('#rpig-task-list');
+    const active = rpigActiveTask;
+    const waiting = rpigGenerationQueue.length;
+    const hasTasks = !!active || waiting > 0;
 
-    try {
+    taskbar.toggle(hasTasks);
+    $('#rpig-cancel-current').prop('disabled', !active);
+    $('#rpig-clear-queue').prop('disabled', waiting === 0);
+    if (summary.length) {
+        const activeLabel = active ? `进行中：消息 ${active.messageIndex + 1}` : '当前无运行任务';
+        summary.text(`${activeLabel} · 排队 ${waiting}`);
+    }
+    if (taskList.length) {
+        taskList.empty().toggle(waiting > 0);
+        for (const [index, task] of rpigGenerationQueue.entries()) {
+            const mode = task.explicitShotMode || getSettings()?.shotMode || 'snapshot';
+            const label = mode === 'portrait' ? '表情特写' : '剧情剧照';
+            taskList.append(
+                $('<div class="rpig-queued-task">').append(
+                    $('<span>').text(`${index + 1}. 消息 ${task.messageIndex + 1} · ${label}`),
+                    $('<button type="button" class="rpig-cancel-queued" title="取消此排队任务">取消</button>').attr('data-task-id', task.id),
+                ),
+            );
+        }
+    }
+}
+
+function cancelCurrentGeneration() {
+    if (!rpigActiveTask) return;
+    rpigActiveTask.controller.abort(createAbortError('用户取消了当前生成任务'));
+    updateGenerationQueueUI();
+}
+
+function clearQueuedGenerations() {
+    if (rpigGenerationQueue.length === 0) return;
+    const removed = rpigGenerationQueue.splice(0);
+    for (const task of removed) {
+        task.resolve({ cancelled: true, queued: true });
+    }
+    updateGenerationQueueUI();
+    toastr.info(`已清空 ${removed.length} 个排队任务`);
+}
+
+function cancelQueuedGeneration(taskId) {
+    const index = rpigGenerationQueue.findIndex(task => task.id === taskId);
+    if (index < 0) return;
+    const [task] = rpigGenerationQueue.splice(index, 1);
+    task.resolve({ cancelled: true, queued: true });
+    updateGenerationQueueUI();
+    toastr.info(`已取消消息 ${task.messageIndex + 1} 的排队任务`);
+}
+
+function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, refs, shotLabel, signal }) {
+    throwIfAborted(signal);
+    $('.rpig-prompt-review-overlay').remove();
+
+    const overlay = $(`<div class="rpig-prompt-review-overlay">
+        <div class="rpig-prompt-review-dialog" role="dialog" aria-modal="true" aria-label="最终提示词预览">
+            <div class="rpig-prompt-review-header">
+                <div><b>📝 最终提示词预览</b><small></small></div>
+                <button type="button" class="rpig-prompt-review-close" title="取消本次任务">✕</button>
+            </div>
+            <div class="rpig-prompt-review-note">导演与总结分析已经完成；只有点击“确认并生成”后才会请求图片后端。</div>
+            <label>最终正向提示词<textarea id="rpig-review-prompt" rows="10"></textarea></label>
+            <div class="rpig-review-counter" id="rpig-review-prompt-count"></div>
+            <label>负向提示词<textarea id="rpig-review-avoid" rows="4"></textarea></label>
+            <div class="rpig-prompt-review-meta"></div>
+            <div class="rpig-prompt-review-actions">
+                <button type="button" class="menu_button rpig-review-reset">恢复 AI 原稿</button>
+                <button type="button" class="menu_button rpig-review-cancel">取消任务</button>
+                <button type="button" class="menu_button rpig-btn-action-primary rpig-review-confirm">确认并生成</button>
+            </div>
+        </div>
+    </div>`);
+    const promptInput = overlay.find('#rpig-review-prompt').val(prompt || '');
+    const avoidInput = overlay.find('#rpig-review-avoid').val(avoid || '');
+    overlay.find('.rpig-prompt-review-header small').text(shotLabel || '配图');
+    const characterText = Array.isArray(visibleCharacters) && visibleCharacters.length
+        ? visibleCharacters.map(item => typeof item === 'string' ? item : (item.name || item.character || '')).filter(Boolean).join('、')
+        : '由最终提示词决定';
+    const referenceText = Array.isArray(refs) && refs.length
+        ? refs.map(ref => ref.label || '参考图').join('；')
+        : '无';
+    overlay.find('.rpig-prompt-review-meta').append(
+        $('<div>').append($('<b>').text('场景锚点：'), document.createTextNode(sceneAnchor || '未指定')),
+        $('<div>').append($('<b>').text('入镜角色：'), document.createTextNode(characterText)),
+        $('<div>').append($('<b>').text('参考图片：'), document.createTextNode(referenceText)),
+    );
+
+    const updateCount = () => overlay.find('#rpig-review-prompt-count').text(`${String(promptInput.val() || '').length} 字符`);
+    promptInput.on('input', updateCount);
+    updateCount();
+    $('body').append(overlay);
+    setTimeout(() => promptInput.trigger('focus'), 0);
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+            signal?.removeEventListener('abort', onAbort);
+            $(document).off('keydown.rpigPromptReview');
+            overlay.remove();
+        };
+        const finish = result => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(result);
+        };
+        const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(signal.reason instanceof Error ? signal.reason : createAbortError());
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        overlay.find('.rpig-review-confirm').on('click', () => {
+            const editedPrompt = String(promptInput.val() || '').trim();
+            if (!editedPrompt) {
+                toastr.warning('最终正向提示词不能为空');
+                promptInput.trigger('focus');
+                return;
+            }
+            finish({ confirmed: true, prompt: editedPrompt, avoid: String(avoidInput.val() || '').trim() });
+        });
+        overlay.find('.rpig-review-reset').on('click', () => {
+            promptInput.val(prompt || '');
+            avoidInput.val(avoid || '');
+            updateCount();
+        });
+        overlay.find('.rpig-review-cancel, .rpig-prompt-review-close').on('click', () => finish({ confirmed: false }));
+        overlay.on('click', event => {
+            if (event.target === overlay[0]) finish({ confirmed: false });
+        });
+        $(document).off('keydown.rpigPromptReview').on('keydown.rpigPromptReview', event => {
+            if (event.key === 'Escape') finish({ confirmed: false });
+        });
+    });
+}
+
+function generateForMessage(messageIndex, presetPrompt, explicitShotMode, presetAvoid, generationMeta = {}) {
+    return new Promise(resolve => {
+        const task = {
+            id: ++rpigTaskSequence,
+            messageIndex,
+            presetPrompt,
+            explicitShotMode,
+            presetAvoid,
+            generationMeta,
+            controller: new AbortController(),
+            resolve,
+        };
+        rpigGenerationQueue.push(task);
+        updateGenerationQueueUI();
+        if (rpigActiveTask) {
+            toastr.info(`任务已加入队列，前方还有 ${rpigGenerationQueue.length - 1} 个任务`);
+        }
+        void processGenerationQueue();
+    });
+}
+
+async function processGenerationQueue() {
+    if (rpigActiveTask) return;
+    while (rpigGenerationQueue.length > 0) {
+        const task = rpigGenerationQueue.shift();
+        rpigActiveTask = task;
+        rpigGenerating = true;
+        updateGenerationQueueUI();
+        try {
+            const result = await executeGenerationTask(task);
+            task.resolve(result);
+            if (!result?.success && !result?.error && !result?.cancelled) {
+                setGenStatus('idle', '');
+            }
+        } catch (error) {
+            task.resolve({ cancelled: isAbortError(error), error });
+        } finally {
+            rpigActiveTask = null;
+            rpigGenerating = false;
+            updateGenerationQueueUI();
+        }
+    }
+}
+
+async function executeGenerationTask(task) {
+    const { messageIndex, presetPrompt, explicitShotMode, presetAvoid, generationMeta = {}, controller } = task;
+    const signal = controller.signal;
+    throwIfAborted(signal);
+
         const context = getContext();
         const capturedChat = context.chat;
         const capturedSessionKey = getChatSessionKey(context);
@@ -619,7 +807,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
                     toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                     return;
                 }
-                const raw = await callLLM(system, userText, s, getContext);
+                const raw = await callLLM(system, userText, s, getContext, { signal });
                 if (!isSessionStillValid()) {
                     toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                     return;
@@ -651,6 +839,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
                         omniscientRequest.userText,
                         s,
                         getContext,
+                        { signal },
                     );
                     if (!isSessionStillValid()) {
                         toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
@@ -668,6 +857,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
                     sceneAnchor = String(omniscientJson.scene_anchor || sceneAnchor || '').trim();
                     avoid = mergeNegativePrompts(avoid, String(omniscientJson.avoid || '').trim());
                 } catch (error) {
+                    if (isAbortError(error)) throw error;
                     const safeMessage = scrubSensitiveText(error?.message || String(error));
                     console.warn('[RP 电影配图] 上帝视角分析失败，继续使用焦点镜头：', safeMessage);
                     toastr.warning(`上帝视角分析失败，已保留焦点镜头继续总结：${escapeHtml(safeMessage)}`);
@@ -697,6 +887,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
                     finalizerRequest.userText,
                     getFinalizerLlmSettings(s),
                     getContext,
+                    { signal },
                 );
                 if (!isSessionStillValid()) {
                     toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
@@ -706,6 +897,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
                 if (!prompt) throw new Error('总结 LLM 返回了空提示词');
                 finalizerApplied = true;
             } catch (error) {
+                if (isAbortError(error)) throw error;
                 const safeMessage = scrubSensitiveText(error?.message || String(error));
                 console.warn('[RP 电影配图] 总结 LLM 失败，使用两份分析的安全合并结果：', safeMessage);
                 toastr.warning(`总结 LLM 失败，已自动合并两份分析继续生成：${escapeHtml(safeMessage)}`);
@@ -767,6 +959,27 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
             }));
             const sameMessageReference = previousGenerated?.sourceType === 'same_message';
 
+            throwIfAborted(signal);
+            if (s.previewBeforeGeneration !== false && generationMeta.automatic !== true) {
+                setGenStatus('working', '④/⑤ 📝 等待确认最终提示词…');
+                const review = await reviewFinalPrompt({
+                    prompt,
+                    avoid,
+                    sceneAnchor,
+                    visibleCharacters,
+                    refs,
+                    shotLabel,
+                    signal,
+                });
+                if (!review.confirmed) {
+                    setGenStatus('idle', '');
+                    toastr.info('已取消本次生成，未请求图片后端');
+                    return { cancelled: true, beforeBackend: true };
+                }
+                prompt = review.prompt;
+                avoid = review.avoid;
+            }
+
             setGenStatus('working', `④/⑤ 🖼 后端渲染中（${shotLabel}）…`);
             result = await generateImage(s, prompt, avoid, refs, {
                 fetchToDataUrl,
@@ -777,6 +990,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
                 denoisingStrength: previousGenerated
                     ? Math.min(0.85, Math.max(0.2, Number(s.continuityDenoising) || 0.48))
                     : undefined,
+                signal,
             });
 
             if (previousGenerated && result.usedRefs === false) {
@@ -789,6 +1003,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
             }
 
             setGenStatus('working', '⑤/⑤ 💾 正在持久化并挂载…');
+            throwIfAborted(signal);
             const rawImageData = result.dataUrl || result.imageUrl;
 
             let persistedUrl = rawImageData;
@@ -798,6 +1013,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
                     fetchToDataUrl,
                 });
             } catch (pErr) {
+                if (isAbortError(pErr)) throw pErr;
                 toastr.warning(`图片持久化失败，使用临时 Data URL：${escapeHtml(pErr.message || pErr)}`);
                 persistedUrl = rawImageData;
             }
@@ -806,6 +1022,7 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
                 toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                 return;
             }
+            throwIfAborted(signal);
 
             if (!capturedMessage.extra) capturedMessage.extra = {};
             migrateLegacyMedia(capturedMessage);
@@ -872,16 +1089,18 @@ async function generateForMessage(messageIndex, presetPrompt, explicitShotMode, 
 
             setGenStatus('done', `${shotLabel}已生成并挂载！`);
             toastr.success(`✨ ${shotLabel}生成成功并已挂载到聊天！`, '', { timeOut: 4000 });
+            return { success: true, url: persistedUrl };
         } catch (error) {
+            if (isAbortError(error)) {
+                setGenStatus('idle', '');
+                toastr.info('已取消当前生成任务');
+                return { cancelled: true };
+            }
             const safeErrMsg = scrubSensitiveText(error.message || String(error));
             setGenStatus('error', safeErrMsg);
             toastr.error(`❌ 生成失败：${escapeHtml(safeErrMsg)}`, '', { timeOut: 12000 });
+            return { error };
         }
-    } finally {
-        rpigGenerating = false;
-        rpigGenDepth = 0;
-        $('.rpig-btn-manual').removeClass('rpig-busy').attr('title', '生成配图');
-    }
 }
 
 async function generateCharacterSheetFlow({
@@ -1028,7 +1247,11 @@ function injectManualButton(messageIndex) {
             if (mainBtn.hasClass('rpig-busy')) return;
             popup.removeClass('rpig-show');
             mainBtn.addClass('rpig-busy').attr('title', '生成中…');
-            await generateForMessage(messageIndex);
+            try {
+                await generateForMessage(messageIndex);
+            } finally {
+                mainBtn.removeClass('rpig-busy').attr('title', '生成配图');
+            }
         });
 
         wrap.find('.rpig-shot-item').on('click', async function (e) {
@@ -1037,7 +1260,11 @@ function injectManualButton(messageIndex) {
             const mode = $(this).attr('data-mode');
             popup.removeClass('rpig-show');
             mainBtn.addClass('rpig-busy').attr('title', '生成中…');
-            await generateForMessage(messageIndex, null, mode);
+            try {
+                await generateForMessage(messageIndex, null, mode);
+            } finally {
+                mainBtn.removeClass('rpig-busy').attr('title', '生成配图');
+            }
         });
 
         let hoverTimer = null;
@@ -1210,7 +1437,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.8</span>
+            <span class="rpig-header-version">v2.9.9</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -1526,8 +1753,18 @@ function buildSettingsUI() {
     const limbRuleNotice = $(`<div class="rpig-hint" style="color:var(--rpig-accent-green);background:rgba(52,211,153,0.08);padding:8px 10px;border-radius:6px;border:1px solid rgba(52,211,153,0.2);line-height:1.5;">
         <b>✨ 肢体与手足规则：</b>允许自然完整出镜。严格约束每只手五指、每只脚五趾与关节连贯，已全面废除旧版强制裁切画外的限制。
     </div>`);
+    const previewBeforeGenerationCheck = $('<input type="checkbox">').prop('checked', s.previewBeforeGeneration !== false);
+    previewBeforeGenerationCheck.on('change', () => {
+        s.previewBeforeGeneration = previewBeforeGenerationCheck.prop('checked');
+        saveSettingsDebounced();
+    });
 
     card3.body.append(row('默认镜头模式', shotModeSelect, '消息操作区 🎬 按钮悬浮或长按时可即时快速切换镜头'));
+    card3.body.append(switchRow(
+        '生成前预览最终提示词',
+        previewBeforeGenerationCheck,
+        '手动出图时可检查并修改正向/负向提示词，确认后才请求图片后端；自动出图不弹窗。',
+    ));
     card3.body.append(limbRuleNotice);
     grid.append(card3.card);
 
@@ -1901,7 +2138,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.8</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.9</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -1958,6 +2195,14 @@ function buildFloatingUI() {
 
         <div class="rpig-fab-status" id="rpig-fab-status"></div>
         <div class="rpig-fab-gen-status" id="rpig-fab-gen-status" style="display:none"></div>
+        <div class="rpig-taskbar" id="rpig-taskbar" style="display:none">
+            <span id="rpig-task-summary"></span>
+            <div class="rpig-task-list" id="rpig-task-list" style="display:none"></div>
+            <div class="rpig-task-actions">
+                <button type="button" class="menu_button" id="rpig-cancel-current">取消当前</button>
+                <button type="button" class="menu_button" id="rpig-clear-queue">清空排队</button>
+            </div>
+        </div>
 
         <div class="rpig-fab-btns">
             <button class="menu_button rpig-btn-action-primary" id="rpig-gen-now" title="以当前所选镜头立即生成当前轮配图">🪄 立即出图</button>
@@ -1967,6 +2212,7 @@ function buildFloatingUI() {
     </div>`);
 
     $('body').append(fab).append(panel);
+    updateGenerationQueueUI();
 
     function refreshStatus() {
         const s = getSettings();
@@ -2241,6 +2487,12 @@ function buildFloatingUI() {
         }
     });
 
+    $('#rpig-cancel-current').on('click', cancelCurrentGeneration);
+    $('#rpig-clear-queue').on('click', clearQueuedGenerations);
+    $('#rpig-task-list').on('click', '.rpig-cancel-queued', function () {
+        cancelQueuedGeneration(Number($(this).attr('data-task-id')));
+    });
+
     $('#rpig-gallery-btn').on('click', () => {
         panel.hide();
         openGallery(getCurrentCharacter());
@@ -2274,7 +2526,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.8</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.9</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2336,8 +2588,10 @@ jQuery(async function () {
     });
 
     eventSource.on(event_types.CHAT_CHANGED, () => {
-        rpigGenerating = false;
-        rpigGenDepth = 0;
+        rpigActiveTask?.controller.abort(createAbortError('会话已切换'));
+        const removed = rpigGenerationQueue.splice(0);
+        for (const task of removed) task.resolve({ cancelled: true, queued: true });
+        updateGenerationQueueUI();
         resetAutoDetectState();
         $('.rpig-btn-manual').removeClass('rpig-busy').attr('title', '生成配图');
         if (typeof window.rpigRefreshCharacterUI === 'function') {
@@ -2356,5 +2610,5 @@ jQuery(async function () {
     try { mountSettingsPanel(); } catch { /* ignore */ }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.8] 现代深色电影工作台重构版已启用。');
+    console.log('[RP 电影配图 v2.9.9] 最终提示词预览与可取消任务队列已启用。');
 });
