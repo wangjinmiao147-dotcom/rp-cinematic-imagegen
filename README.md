@@ -2,7 +2,7 @@
 
 面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的电影级角色扮演配图扩展。它会根据当前剧情、在场人物与角色参考图，生成剧照抓拍、表情特写、三视图或全身立绘，并把结果保存在当前聊天与角色图库中。
 
-当前版本：**v2.9.10**
+当前版本：**v2.9.11**
 已验证环境：**SillyTavern 1.18.0**
 
 ## 功能
@@ -30,7 +30,7 @@
 
 ### 使用 ZIP 手动安装
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.10.zip`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.11.zip`。
 2. 解压后得到 `rp-cinematic-imagegen` 文件夹。
 3. 把该文件夹复制到：
 

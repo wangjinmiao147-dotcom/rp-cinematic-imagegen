@@ -1,5 +1,5 @@
 /* ============================================================
-   RP 电影配图 (rp-cinematic-imagegen) — v2.9.10
+   RP 电影配图 (rp-cinematic-imagegen) — v2.9.11
    现代深色电影工作台规范 · 纯原生 CSS · 响应式双栏与微交互
    ============================================================ */
 
@@ -540,6 +540,16 @@
   background: linear-gradient(160deg, rgba(24, 27, 42, 0.99), rgba(13, 16, 27, 0.99));
   color: var(--rpig-text-title);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58);
+}
+
+.rpig-prompt-review-dialog.rpig-review-attention {
+  animation: rpig-review-attention 0.34s ease;
+}
+
+@keyframes rpig-review-attention {
+  0%, 100% { transform: translateX(0); border-color: rgba(139, 122, 232, 0.42); }
+  30% { transform: translateX(-5px); border-color: rgba(251, 191, 36, 0.72); }
+  65% { transform: translateX(5px); border-color: rgba(251, 191, 36, 0.72); }
 }
 
 .rpig-prompt-review-header {
