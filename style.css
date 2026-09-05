@@ -1,5 +1,5 @@
 /* ============================================================
-   RP 电影配图 (rp-cinematic-imagegen) — v2.9.14
+   RP 电影配图 (rp-cinematic-imagegen) — v2.9.15
    现代深色电影工作台规范 · 纯原生 CSS · 响应式双栏与微交互
    ============================================================ */
 
@@ -268,57 +268,24 @@
   transition: none !important;
 }
 
-/* 手机端不依赖会被折叠的消息操作栏，常驻提供主动出图入口。 */
-.rpig-mobile-actions {
-  display: none;
-}
-
 @media (max-width: 900px) {
   .rpig-fab {
-    display: none !important;
-  }
-
-  .rpig-mobile-actions {
-    position: fixed;
-    right: max(10px, env(safe-area-inset-right, 0px));
-    bottom: calc(70px + env(safe-area-inset-bottom, 0px));
-    z-index: 9999;
+    position: fixed !important;
     display: flex !important;
-    align-items: center;
-    gap: 6px;
-    padding: 5px;
-    border: 1px solid rgba(139, 122, 232, 0.45);
-    border-radius: 22px;
-    background: rgba(14, 17, 28, 0.94);
-    box-shadow: var(--rpig-shadow-md), 0 0 14px rgba(139, 122, 232, 0.25);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-  }
-
-  .rpig-mobile-actions .menu_button {
-    min-width: 68px;
-    min-height: 36px;
-    margin: 0;
-    padding: 7px 10px;
-    border-radius: 18px;
-    font-size: 13px;
-    touch-action: manipulation;
-  }
-
-  .rpig-mobile-gen-now {
-    color: #fff !important;
-    background: linear-gradient(135deg, var(--rpig-accent-purple), #6554d9) !important;
-    border-color: rgba(255, 255, 255, 0.18) !important;
+    right: max(10px, env(safe-area-inset-right, 0px));
+    bottom: calc(82px + env(safe-area-inset-bottom, 0px));
+    width: 44px;
+    height: 44px;
+    font-size: 19px;
+    z-index: 10002;
+    touch-action: none;
   }
 
   .rpig-fab-panel {
-    left: 8px !important;
-    right: 8px !important;
-    top: auto !important;
-    bottom: calc(122px + env(safe-area-inset-bottom, 0px)) !important;
-    width: auto !important;
-    max-width: none !important;
-    max-height: calc(100dvh - 145px);
+    width: 320px;
+    max-width: calc(100vw - 20px);
+    max-height: calc(100vh - 100px);
+    max-height: calc(100dvh - 100px);
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -326,7 +293,9 @@
   }
 
   .rpig-btn-manual,
-  .rpig-btn-gallery {
+  .rpig-btn-gallery,
+  .rpig-fab-panel button,
+  .rpig-fab-panel select {
     display: inline-flex !important;
     align-items: center;
     justify-content: center;

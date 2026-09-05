@@ -4,15 +4,17 @@ import test from 'node:test';
 
 const root = new URL('../', import.meta.url);
 
-test('mobile UI exposes direct generate and panel buttons', async () => {
+test('mobile UI reuses the full desktop floating workbench', async () => {
   const source = await readFile(new URL('index.js', root), 'utf8');
   const css = await readFile(new URL('style.css', root), 'utf8');
 
-  assert.match(source, /class="menu_button rpig-mobile-gen-now"/);
-  assert.match(source, /class="menu_button rpig-mobile-open-panel"/);
-  assert.match(source, /mobileActions\.find\('\.rpig-mobile-gen-now'\)\.on\('click', generateLatestAssistantMessage\)/);
-  assert.match(source, /mobileActions\.find\('\.rpig-mobile-open-panel'\)\.on\('click', toggleFloatingPanel\)/);
+  assert.match(source, /class="rpig-fab"/);
+  assert.match(source, /id="rpig-gen-now"/);
+  assert.match(source, /id="rpig-gallery-btn"/);
+  assert.match(source, /id="rpig-open-settings"/);
+  assert.doesNotMatch(source, /rpig-mobile-actions/);
   assert.match(css, /@media \(max-width: 900px\)/);
-  assert.match(css, /\.rpig-mobile-actions[\s\S]*display: flex !important/);
+  assert.match(css, /\.rpig-fab[\s\S]*position: fixed !important;[\s\S]*display: flex !important/);
+  assert.match(css, /\.rpig-fab-panel[\s\S]*max-height: calc\(100dvh - 100px\)/);
   assert.match(css, /safe-area-inset-bottom/);
 });
