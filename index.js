@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.15
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.16
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -77,6 +77,8 @@ import {
     resetAutoDetectState,
     getChatSessionKey,
 } from './src/auto.js';
+
+import { normalizeCastCharacters } from './src/cast.js';
 
 // ------------------------------------------------------------
 // 常量定义与默认设置
@@ -246,7 +248,7 @@ function buildParticipantContext(context, chat, messageIndex, focalCharacter, cu
     }
 
     const lines = [
-        `- identity=user；canonical_name=${userName}；role=用户主人公；aliases=User, you, 用户, 玩家, 主人公`,
+        `- identity=user；canonical_name=${userName}；role=候选用户主人公；presence=unknown；aliases=User, you, 用户, 玩家, 主人公；注意：用户身份存在不等于身体在镜头内`,
     ];
     const seen = new Set(['user']);
     for (const character of selected) {
@@ -258,62 +260,27 @@ function buildParticipantContext(context, chat, messageIndex, focalCharacter, cu
         const description = stripHtml(character.data?.description || character.description || '')
             .replace(/\s+/g, ' ')
             .slice(0, 650);
-        const role = character === focalCharacter || name === focalName ? '当前回复角色' : '候选群聊角色';
-        const aliases = role === '当前回复角色' ? `；aliases=AI, Assistant, Bot, ${chat?.[messageIndex]?.name || ''}` : '';
-        lines.push(`- identity=character:${identityKey}；canonical_name=${name}；role=${role}${aliases}${anchor ? `；视觉锚点=${anchor}` : ''}${description ? `；设定=${description}` : ''}`);
+        const role = character === focalCharacter || name === focalName ? '当前回复角色候选' : '候选群聊角色';
+        const aliases = role === '当前回复角色候选' ? `；aliases=AI, Assistant, Bot, ${chat?.[messageIndex]?.name || ''}` : '';
+        lines.push(`- identity=character:${identityKey}；canonical_name=${name}；role=${role}；presence=unknown；群成员/消息说话人身份均不证明在场${aliases}${anchor ? `；视觉锚点=${anchor}` : ''}${description ? `；设定=${description}` : ''}`);
     }
     if (!lines.some(line => line.includes(`canonical_name=${focalName}`))) {
-        lines.push(`- identity=current-role；canonical_name=${focalName}；role=当前回复角色；aliases=AI, Assistant, Bot, ${chat?.[messageIndex]?.name || ''}`);
+        lines.push(`- identity=current-role；canonical_name=${focalName}；role=当前回复角色候选；presence=unknown；说话或叙述身份不自动证明身体入镜；aliases=AI, Assistant, Bot, ${chat?.[messageIndex]?.name || ''}`);
     }
     lines.push('- 其他 NPC：仅当最新焦点回合明确表明其身体处于当前镜头内时，才加入最终可见演员表；只被提及、回忆、通话或已经离场者不入镜。');
     return lines.join('\n');
 }
 
-function normalizeVisibleCharacters(rawCharacters, context, chat, messageIndex, focalCharacter) {
-    const recent = Array.isArray(chat) ? chat.slice(Math.max(0, messageIndex - 12), messageIndex + 1) : [];
-    const userName = String(context?.name1 || [...recent].reverse().find(message => message?.is_user)?.name || 'User protagonist').trim();
-    const focalName = String(focalCharacter?.name || chat?.[messageIndex]?.name || context?.name2 || 'Current role character').trim();
-    const currentMessageName = String(chat?.[messageIndex]?.name || '').trim();
-    const userAliases = new Set(['user', 'you', '用户', '玩家', '主人公', '主角', 'protagonist', 'user protagonist', 'player character', userName.toLowerCase()]);
-    const focalAliases = new Set(['ai', 'assistant', 'bot', '角色', '当前角色', '当前回复角色', 'current character', 'current role character', focalName.toLowerCase(), currentMessageName.toLowerCase()].filter(Boolean));
-    const values = Array.isArray(rawCharacters) ? rawCharacters : [];
-    const normalized = [];
-    const seen = new Set();
-    const add = (name) => {
-        const clean = String(name || '').replace(/^[-*\d.\s]+/, '').replace(/[\[\]"']/g, '').trim();
-        if (!clean) return;
-        const lower = clean.toLowerCase();
-        const comparable = clean
-            .replace(/^(?:the\s+)?(?:user protagonist|player character|current role character|current character|用户主人公|当前回复角色|当前角色)\s*[:：=\-]?\s*/i, '')
-            .replace(/\s*\((?:ai|assistant|bot|user|you|current role|current character|用户|玩家|主人公|当前角色)\)\s*$/i, '')
-            .trim();
-        const comparableLower = comparable.toLowerCase();
-        const canonical = userAliases.has(lower) || userAliases.has(comparableLower)
-            ? userName
-            : focalAliases.has(lower) || focalAliases.has(comparableLower)
-                ? focalName
-                : comparable || clean;
-        const key = canonical.toLowerCase();
-        if (!seen.has(key)) {
-            seen.add(key);
-            normalized.push(canonical);
-        }
-    };
-    add(userName);
-    add(focalName);
-    for (const item of values) {
-        add(typeof item === 'string' ? item : (item?.canonical_name || item?.name || item?.role || ''));
-        if (normalized.length >= 12) break;
-    }
-    return normalized;
-}
-
-function enforceOmniscientEnsemble(prompt, visibleCharacters) {
+function enforceOmniscientEnsemble(prompt, visibleCharacters, excludedCharacters = []) {
     const names = Array.isArray(visibleCharacters) ? visibleCharacters.filter(Boolean).slice(0, 12) : [];
     if (!names.length) return collapsePromptToSingleParagraph(prompt);
     const shot = names.length === 1 ? 'single-character medium shot' : names.length === 2 ? 'balanced two-shot' : 'clear group ensemble shot';
     const ensembleRule = `The visible cast is locked to exactly ${names.length} distinct ${names.length === 1 ? 'person' : 'people'}: ${names.join(', ')}. Use one unified ${shot}; show every listed person exactly once with a distinct body, face, position, gaze, and action. Do not add anyone outside this cast, including extra people, bystanders, crowds, reflected people, portraits, or duplicated bodies.`;
-    return collapsePromptToSingleParagraph(`${ensembleRule} ${prompt}`);
+    const excluded = Array.isArray(excludedCharacters) ? excludedCharacters.filter(Boolean).slice(0, 12) : [];
+    const exclusionRule = excluded.length
+        ? `The following story participants are explicitly off-camera and must not appear in any form: ${excluded.join(', ')}.`
+        : '';
+    return collapsePromptToSingleParagraph(`${ensembleRule} ${exclusionRule} ${prompt}`);
 }
 
 async function getCharacterAvatarDataUrl(character) {
@@ -592,7 +559,7 @@ function cancelQueuedGeneration(taskId) {
     toastr.info(`已取消消息 ${task.messageIndex + 1} 的排队任务`);
 }
 
-function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, refs, shotLabel, signal }) {
+function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excludedCharacters, refs, shotLabel, signal }) {
     throwIfAborted(signal);
     $('.rpig-prompt-review-overlay').remove();
 
@@ -620,12 +587,16 @@ function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, refs
     const characterText = Array.isArray(visibleCharacters) && visibleCharacters.length
         ? visibleCharacters.map(item => typeof item === 'string' ? item : (item.name || item.character || '')).filter(Boolean).join('、')
         : '由最终提示词决定';
+    const excludedCharacterText = Array.isArray(excludedCharacters) && excludedCharacters.length
+        ? excludedCharacters.join('、')
+        : '无';
     const referenceText = Array.isArray(refs) && refs.length
         ? refs.map(ref => ref.label || '参考图').join('；')
         : '无';
     overlay.find('.rpig-prompt-review-meta').append(
         $('<div>').append($('<b>').text('场景锚点：'), document.createTextNode(sceneAnchor || '未指定')),
         $('<div>').append($('<b>').text('入镜角色：'), document.createTextNode(characterText)),
+        $('<div>').append($('<b>').text('明确不入镜：'), document.createTextNode(excludedCharacterText)),
         $('<div>').append($('<b>').text('参考图片：'), document.createTextNode(referenceText)),
     );
 
@@ -772,6 +743,7 @@ async function executeGenerationTask(task) {
         let directorDraft = prompt;
         let omniscientDraft = '';
         let visibleCharacters = [];
+        let excludedCharacters = [];
         let finalizerApplied = false;
         let avoid = presetAvoid || '';
         let sceneAnchor = (generationMeta.sceneAnchor || '').trim();
@@ -853,13 +825,17 @@ async function executeGenerationTask(task) {
                     }
                     const omniscientJson = extractJson(omniscientRaw) || {};
                     omniscientDraft = String(omniscientJson.ensemble_prompt || omniscientJson.final_prompt || '').trim();
-                    visibleCharacters = normalizeVisibleCharacters(
-                        omniscientJson.visible_characters,
+                    const castContext = {
                         context,
-                        capturedChat,
+                        chat: capturedChat,
                         messageIndex,
-                        character,
-                    );
+                        focalCharacter: character,
+                    };
+                    visibleCharacters = normalizeCastCharacters(omniscientJson.visible_characters, castContext);
+                    excludedCharacters = normalizeCastCharacters(omniscientJson.excluded_characters, {
+                        ...castContext,
+                        fallbackToFocal: false,
+                    }).filter(name => !visibleCharacters.includes(name));
                     sceneAnchor = String(omniscientJson.scene_anchor || sceneAnchor || '').trim();
                     avoid = mergeNegativePrompts(avoid, String(omniscientJson.avoid || '').trim());
                 } catch (error) {
@@ -867,7 +843,12 @@ async function executeGenerationTask(task) {
                     const safeMessage = scrubSensitiveText(error?.message || String(error));
                     console.warn('[RP 电影配图] 上帝视角分析失败，继续使用焦点镜头：', safeMessage);
                     toastr.warning(`上帝视角分析失败，已保留焦点镜头继续总结：${escapeHtml(safeMessage)}`);
-                    visibleCharacters = normalizeVisibleCharacters([], context, capturedChat, messageIndex, character);
+                    visibleCharacters = normalizeCastCharacters([], {
+                        context,
+                        chat: capturedChat,
+                        messageIndex,
+                        focalCharacter: character,
+                    });
                 }
             } else {
                 setGenStatus('working', '②/⑤ 👁️ 上帝视角已关闭，使用原有焦点镜头');
@@ -881,6 +862,7 @@ async function executeGenerationTask(task) {
                 currentMessageText: capturedMes || '',
                 participantContext,
                 visibleCharacters,
+                excludedCharacters,
                 sceneAnchor,
                 continuityContext: previousGenerated?.prompt || '',
                 shotMode,
@@ -911,7 +893,7 @@ async function executeGenerationTask(task) {
             }
 
             if (s.omniscientMode !== false) {
-                prompt = enforceOmniscientEnsemble(prompt, visibleCharacters);
+                prompt = enforceOmniscientEnsemble(prompt, visibleCharacters, excludedCharacters);
             }
 
             const basePrompt = prompt;
@@ -973,6 +955,7 @@ async function executeGenerationTask(task) {
                     avoid,
                     sceneAnchor,
                     visibleCharacters,
+                    excludedCharacters,
                     refs,
                     shotLabel,
                     signal,
@@ -1057,6 +1040,7 @@ async function executeGenerationTask(task) {
                 directorDraft,
                 omniscientDraft,
                 visibleCharacters,
+                excludedCharacters,
                 finalizerApplied,
             };
 
@@ -1443,7 +1427,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.15</span>
+            <span class="rpig-header-version">v2.9.16</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2144,7 +2128,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.15</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.16</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2538,7 +2522,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.15</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.16</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2622,5 +2606,5 @@ jQuery(async function () {
     try { mountSettingsPanel(); } catch { /* ignore */ }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.15] 桌面与移动端统一悬浮工作台已启用。');
+    console.log('[RP 电影配图 v2.9.16] 严格在场演员表与统一悬浮工作台已启用。');
 });

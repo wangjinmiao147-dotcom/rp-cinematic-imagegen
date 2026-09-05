@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-rp-cinematic-imagegen",
-  "version": "2.9.15",
+  "version": "2.9.16",
   "private": true,
   "description": "SillyTavern 电影级角色扮演配图扩展",
   "license": "MIT",
@@ -11,7 +11,7 @@
   },
   "scripts": {
     "check": "node scripts/check-release.mjs",
-    "test": "node --test tests/cancellation.test.mjs tests/mobile-ui.test.mjs tests/tavern-helper-installer.test.mjs",
+    "test": "node --test tests/cancellation.test.mjs tests/cast.test.mjs tests/mobile-ui.test.mjs tests/tavern-helper-installer.test.mjs",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
     "prepare:repo": "node scripts/prepare-github.mjs"
   },

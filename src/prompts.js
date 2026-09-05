@@ -176,17 +176,20 @@ export const OMNISCIENT_SYSTEM_PROMPT = `你是电影场面调度师，使用“
 
 【硬规则】
 1. 最新 AI 回复的事实优先；历史只用于确认人物关系、持续造型和地点。
-2. 【候选人物资料】只是用于身份消歧，不等于全部入镜。你必须根据最新焦点回合建立“当前可见演员表”：用户主人公、当前确实在场的角色、群像成员和身体明确处于镜头内的 NPC。只被提及、回忆、打电话、在照片/镜子/屏幕中出现或已经离场的人不得加入。
-3. 合并同一人物的别名。AI、Assistant、Bot、当前消息说话人名称和当前角色卡名称可能指同一个角色；User、you、用户、玩家、主人公和用户名称可能指同一个人。别名不得被计算成额外人物。
-4. “所有人的视角”表示理解每个人看见什么、在回应谁，再将这些关系转成可见的眼神、身体朝向和空间关系；最终仍是一台摄影机拍摄的一个连续瞬间，禁止分屏、拼贴、多画格和同时出现多个摄像机视角。
-5. 内心想法只能转成可见表情或姿态，不得把文字、字幕、对话气泡、幻象或旁白画进图片。
-6. 根据最终可见演员表选择构图：一人使用单人镜头，两人使用 balanced two-shot，三人及以上使用 clear group ensemble shot。演员表有几人，画面就必须恰好出现几人，每人只出现一次，不得增加路人、群众、倒影人物或复制身体。
-7. 手脚允许自然出镜；每只可见手五指、每只可见脚五趾，手腕脚踝连接正确，人物肢体数量正常。
-8. visible_characters 必须使用消歧后的规范姓名或明确身份，每个真实人物只列一次。ensemble_prompt 必须逐一写出其中每个人的外貌、位置、视线、动作和关系。
+2. 【候选人物资料】只是身份字典，绝不是入镜名单。群成员、角色卡存在、最近说过话、当前消息由谁回复、被别人称呼或没有明确写出“离开”，都不能单独证明其身体在镜头内。
+3. 只把具备可靠“身体在场证据”的人物加入 visible_characters：最新焦点回合明确描写其身体、动作、位置或与环境的实体互动；或者前序已明确进入同一场景、场景未切换且之后没有离场。每个入镜人物必须给出简短 presence_evidence。证据不充分时默认排除，宁可单人镜头，不得为了群聊或群像凑人数。
+4. 用户主人公和当前回复角色也不自动入镜。若最新剧情明确为女1独处，即使女2属于同一群聊、近期发过言或角色卡仍存在，也必须只列女1，并把女2放入 excluded_characters。
+5. 合并同一人物的别名。AI、Assistant、Bot、当前消息说话人名称和当前角色卡名称可能指同一个角色；User、you、用户、玩家、主人公和用户名称可能指同一个人。别名不得被计算成额外人物。
+6. “所有人的视角”表示理解每个已确认在场者看见什么、在回应谁，再将关系转成同一画面内的眼神、身体朝向和空间关系；禁止分屏、拼贴、多画格和多摄像机视角。
+7. 内心想法只能转成可见表情或姿态，不得把文字、字幕、对话气泡、幻象或旁白画进图片。
+8. 根据最终可见演员表选择构图：一人使用单人镜头，两人使用 balanced two-shot，三人及以上使用 clear group ensemble shot。演员表有几人，画面就必须恰好出现几人，每人只出现一次，不得增加路人、群众、倒影人物或复制身体。
+9. 手脚允许自然出镜；每只可见手五指、每只可见脚五趾，手腕脚踝连接正确，人物肢体数量正常。
+10. ensemble_prompt 只能描述 visible_characters，必须删掉 excluded_characters 的外貌、位置、动作和互动，不得把被排除者作为远景、倒影、照片、幻象或背景人物补回画面。
 
 只输出一个 JSON 对象：
 {
-  "visible_characters": ["消歧后的规范姓名或身份；一人一项，不含别名重复"],
+  "visible_characters": [{"canonical_name": "消歧后的规范姓名或身份", "presence_evidence": "证明此人身体在当前场景内的最新剧情事实"}],
+  "excluded_characters": [{"canonical_name": "候选但不应入镜的人物", "reason": "仅为群成员/被提及/已离场/证据不足等"}],
   "ensemble_prompt": "严格按照 visible_characters 的人数和名单，呈现全部当前可见人物、空间位置、视线和互动关系的英文画面提示词片段",
   "scene_anchor": "英文场景事实：地点、时间/天气、主光源、关键环境物",
   "avoid": "英文负面词，包含 unlisted person, duplicate person, cloned character, reflected person, identity swap, split screen, collage, text；不得否定演员表中已确认的人物或群像"
@@ -208,7 +211,7 @@ export function buildOmniscientPrompt({
     if (directorDraft) userText += `\n\n【焦点镜头初稿，供核错补漏】：\n${stripHtml(directorDraft).slice(0, 2200)}`;
     if (sceneAnchor) userText += `\n\n【已提取场景锚点】：${stripHtml(sceneAnchor).slice(0, 700)}`;
     userText += `\n\n【镜头模式】：${shotMode}\n【画风设置】：${stylePreset}`;
-    userText += '\n【演员表硬约束】：先合并同一人物的所有别名，再列出当前身体确实在场的人物。普通单聊通常是用户主人公与当前角色两人；群聊、群像或最新剧情明确出现 NPC 时允许更多人。最终画面人数必须与 visible_characters 完全相等。手脚允许自然出镜，每只可见手恰好五指，每只可见脚恰好五趾。';
+    userText += '\n【演员表硬约束】：先判断身体在场证据，再合并别名。不要预设用户、当前回复角色或所有群成员都在场；“属于群聊”“近期说过话”“角色卡存在”都不是入镜证据。证据不足一律放入 excluded_characters。若当前场景只有一人，就必须返回恰好一人的 visible_characters 和 single-character shot。最终画面人数必须与 visible_characters 完全相等。';
     return { system: OMNISCIENT_SYSTEM_PROMPT, userText };
 }
 
@@ -219,6 +222,7 @@ export const FINALIZER_SYSTEM_PROMPT = `你是最终生图提示词总编。你�
 【成稿规则】
 - 只描绘一个时间点、一处场景、一台摄影机和一个统一构图。
 - 若提供【最终锁定的可见演员表】，人数与名单是最高优先级硬约束。画面只能出现名单中的人物，并且必须全部出现、每人一次；不得把 AI/角色名或 User/主人公等别名画成额外人物。两人使用 balanced two-shot，三人及以上使用 clear group ensemble shot。
+- 若提供【明确不入镜名单】，必须从焦点初稿和上帝视角稿中删除与这些人物有关的外貌、身体、动作、位置及互动描述；不得让其以远景、倒影、照片、屏幕、幻象或背景人物出现。
 - 把所有人物的主观反应转为同一画面内可见的表情、视线与身体关系；禁止分屏、拼贴、多画格、文字、字幕、对话框和水印。
 - 保留真实动机光源、景别、机位、景深和电影质感，但不要堆砌相互冲突的风格词或镜头词。
 - 手脚可以自然出镜并执行剧情动作。明确要求每只可见手五指、每只可见脚五趾、手腕脚踝自然连接、肢体数量正常。
@@ -230,6 +234,7 @@ export function buildFinalizerPrompt({
     currentMessageText = '',
     participantContext = '',
     visibleCharacters = [],
+    excludedCharacters = [],
     sceneAnchor = '',
     continuityContext = '',
     shotMode = 'snapshot',
@@ -242,6 +247,9 @@ export function buildFinalizerPrompt({
     if (participantContext) userText += `\n\n【人物身份与视觉资料】：\n${participantContext.slice(0, 6000)}`;
     if (Array.isArray(visibleCharacters) && visibleCharacters.length) {
         userText += `\n\n【最终锁定的可见演员表 · 恰好 ${visibleCharacters.length} 人】：\n${visibleCharacters.map((name, index) => `${index + 1}. ${name}`).join('\n')}`;
+    }
+    if (Array.isArray(excludedCharacters) && excludedCharacters.length) {
+        userText += `\n\n【明确不入镜名单 · 必须从成稿彻底删除】：\n${excludedCharacters.map((name, index) => `${index + 1}. ${name}`).join('\n')}`;
     }
     if (sceneAnchor) userText += `\n\n【场景锚点】：${stripHtml(sceneAnchor).slice(0, 700)}`;
     if (continuityContext) userText += `\n\n【上一镜头造型连续性，仅继承未改变的脸、发型、服装和配饰】：\n${stripHtml(continuityContext).slice(0, 1600)}`;
