@@ -16,7 +16,7 @@ npm run check
 ```powershell
 git init -b main
 git add .
-git commit -m "Release v2.9.9"
+git commit -m "Release v2.9.10"
 git remote add origin https://github.com/你的用户名/rp-cinematic-imagegen.git
 git push -u origin main
 ```
@@ -26,8 +26,8 @@ git push -u origin main
 ## 3. 创建 Release
 
 ```powershell
-git tag v2.9.9
-git push origin v2.9.9
+git tag v2.9.10
+git push origin v2.9.10
 ```
 
 GitHub Actions 会运行发布校验、生成 ZIP 与 SHA-256，并创建 GitHub Release。

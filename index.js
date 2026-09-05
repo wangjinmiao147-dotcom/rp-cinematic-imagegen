@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.9
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.10
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -1437,7 +1437,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.9</span>
+            <span class="rpig-header-version">v2.9.10</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2138,7 +2138,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.9</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.10</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2526,7 +2526,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.9</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.10</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2610,5 +2610,5 @@ jQuery(async function () {
     try { mountSettingsPanel(); } catch { /* ignore */ }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.9] 最终提示词预览与可取消任务队列已启用。');
+    console.log('[RP 电影配图 v2.9.10] 最终提示词预览与可取消任务队列已启用。');
 });

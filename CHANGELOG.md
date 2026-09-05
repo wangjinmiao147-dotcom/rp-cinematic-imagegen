@@ -2,6 +2,10 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.9.10] - 2026-09-05
+
+- 修正 GitHub Windows / Node 20 环境下测试文件路径的兼容性，确保自动构建与 Release 正常执行。
+
 ## [2.9.9] - 2026-09-05
 
 ### 新增与改进
