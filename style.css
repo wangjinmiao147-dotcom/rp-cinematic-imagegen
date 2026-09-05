@@ -1,5 +1,5 @@
 /* ============================================================
-   RP 电影配图 (rp-cinematic-imagegen) — v2.9.17
+   RP 电影配图 (rp-cinematic-imagegen) — v2.9.18
    现代深色电影工作台规范 · 纯原生 CSS · 响应式双栏与微交互
    ============================================================ */
 
@@ -566,6 +566,10 @@
   -webkit-backdrop-filter: blur(9px);
 }
 
+body.rpig-review-open {
+  overflow: hidden !important;
+}
+
 .rpig-prompt-review-dialog {
   width: min(760px, 96vw);
   max-height: 92vh;
@@ -674,9 +678,71 @@
 }
 
 @media (max-width: 600px) {
-  .rpig-prompt-review-overlay { padding: 8px; }
-  .rpig-prompt-review-dialog { padding: 13px; max-height: 96vh; }
-  .rpig-prompt-review-actions .menu_button { flex: 1 1 100%; }
+  .rpig-prompt-review-overlay {
+    box-sizing: border-box;
+    height: 100vh;
+    height: 100dvh;
+    align-items: flex-start;
+    padding: max(6px, env(safe-area-inset-top, 0px)) 6px max(6px, env(safe-area-inset-bottom, 0px));
+    overflow: hidden;
+  }
+
+  .rpig-prompt-review-dialog {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-height: 100%;
+    padding: 12px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .rpig-prompt-review-header {
+    position: sticky;
+    top: -12px;
+    z-index: 3;
+    margin: -12px -12px 8px;
+    padding: 12px 12px 9px;
+    background: rgba(22, 25, 40, 0.99);
+    border-bottom: 1px solid rgba(139, 122, 232, 0.22);
+  }
+
+  .rpig-prompt-review-dialog textarea {
+    min-height: 104px;
+    max-height: 28dvh;
+    font-size: 16px;
+    resize: vertical;
+  }
+
+  .rpig-prompt-review-actions {
+    position: sticky;
+    bottom: -12px;
+    z-index: 4;
+    display: flex;
+    margin: 14px -12px -12px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+    background: rgba(13, 16, 27, 0.99);
+    border-top: 1px solid rgba(139, 122, 232, 0.28);
+    box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.32);
+  }
+
+  .rpig-prompt-review-actions .menu_button {
+    flex: 1 1 calc(50% - 4px);
+    min-height: 42px;
+    margin: 0;
+    touch-action: manipulation;
+  }
+
+  .rpig-prompt-review-actions .rpig-review-confirm {
+    order: -1;
+    flex-basis: 100%;
+    font-size: 14px;
+    font-weight: 700;
+  }
 }
 
 .rpig-fab-btns {

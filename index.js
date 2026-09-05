@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.17
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.18
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -562,6 +562,7 @@ function cancelQueuedGeneration(taskId) {
 function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excludedCharacters, refs, shotLabel, signal }) {
     throwIfAborted(signal);
     $('.rpig-prompt-review-overlay').remove();
+    $('body').removeClass('rpig-review-open');
 
     const overlay = $(`<div class="rpig-prompt-review-overlay">
         <div class="rpig-prompt-review-dialog" role="dialog" aria-modal="true" aria-label="最终提示词预览">
@@ -603,14 +604,19 @@ function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excl
     const updateCount = () => overlay.find('#rpig-review-prompt-count').text(`${String(promptInput.val() || '').length} 字符`);
     promptInput.on('input', updateCount);
     updateCount();
-    $('body').append(overlay);
-    setTimeout(() => promptInput.trigger('focus'), 0);
+    $('body').addClass('rpig-review-open').append(overlay);
+    const shouldAutofocusPromptReview = typeof window.matchMedia !== 'function'
+        || window.matchMedia('(min-width: 601px) and (pointer: fine)').matches;
+    if (shouldAutofocusPromptReview) {
+        setTimeout(() => promptInput.trigger('focus'), 0);
+    }
 
     return new Promise((resolve, reject) => {
         let settled = false;
         const cleanup = () => {
             signal?.removeEventListener('abort', onAbort);
             $(document).off('keydown.rpigPromptReview');
+            $('body').removeClass('rpig-review-open');
             overlay.remove();
         };
         const finish = result => {
@@ -1427,7 +1433,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.17</span>
+            <span class="rpig-header-version">v2.9.18</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2128,7 +2134,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.17</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.18</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2522,7 +2528,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.17</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.18</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2606,5 +2612,5 @@ jQuery(async function () {
     try { mountSettingsPanel(); } catch { /* ignore */ }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.17] 严格在场演员表、策略拦截降级与统一悬浮工作台已启用。');
+    console.log('[RP 电影配图 v2.9.18] 移动端固定确认栏与统一悬浮工作台已启用。');
 });
