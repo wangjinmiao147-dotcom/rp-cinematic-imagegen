@@ -922,6 +922,23 @@ body.rpig-review-open {
   gap: 10px;
 }
 
+/* SillyTavern's .menu_button uses min-content, which collapses Chinese
+   labels to one character per line. Scope the override to our settings. */
+#rpig_container .menu_button {
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+#rpig_container .rpig-card-body > button.menu_button,
+#rpig_container #rpig-sheet-gen-btn {
+  width: 100%;
+  flex-shrink: 0;
+}
+
 /* 特别突出：上帝视角独立展示卡片 */
 #rpig-perspective-section {
   border: 1px solid rgba(139, 122, 232, 0.35);

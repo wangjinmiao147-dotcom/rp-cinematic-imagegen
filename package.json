@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-rp-cinematic-imagegen",
-  "version": "2.9.24",
+  "version": "2.9.25",
   "private": true,
   "description": "SillyTavern 电影级角色扮演配图扩展",
   "license": "MIT",
@@ -16,7 +16,8 @@
     "prepare:repo": "node scripts/prepare-github.mjs",
     "test:android": "node scripts/test-android.mjs",
     "test:android:server": "node scripts/android-fixture-server.mjs",
-    "test:android:gallery": "node scripts/test-android-gallery.mjs"
+    "test:android:gallery": "node scripts/test-android-gallery.mjs",
+    "test:android:settings": "node scripts/test-android-settings.mjs"
   },
   "engines": {
     "node": ">=18"
