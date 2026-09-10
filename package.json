@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-rp-cinematic-imagegen",
-  "version": "2.9.25",
+  "version": "2.9.26",
   "private": true,
   "description": "SillyTavern 电影级角色扮演配图扩展",
   "license": "MIT",
@@ -11,13 +11,14 @@
   },
   "scripts": {
     "check": "node scripts/check-release.mjs",
-    "test": "node --test tests/cancellation.test.mjs tests/cast.test.mjs tests/llm.test.mjs tests/mobile-ui.test.mjs tests/mobile-behavior.test.mjs tests/reference-storage.test.mjs tests/settings.test.mjs tests/tavern-helper-installer.test.mjs tests/image-retry.test.mjs tests/gemini-protocol.test.mjs",
+    "test": "node --test tests/cancellation.test.mjs tests/cast.test.mjs tests/llm.test.mjs tests/mobile-ui.test.mjs tests/mobile-behavior.test.mjs tests/reference-storage.test.mjs tests/settings.test.mjs tests/tavern-helper-installer.test.mjs tests/image-retry.test.mjs tests/gemini-protocol.test.mjs tests/reference-import.test.mjs",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
     "prepare:repo": "node scripts/prepare-github.mjs",
     "test:android": "node scripts/test-android.mjs",
     "test:android:server": "node scripts/android-fixture-server.mjs",
     "test:android:gallery": "node scripts/test-android-gallery.mjs",
-    "test:android:settings": "node scripts/test-android-settings.mjs"
+    "test:android:settings": "node scripts/test-android-settings.mjs",
+    "test:android:import": "node scripts/test-android-import.mjs"
   },
   "engines": {
     "node": ">=18"

@@ -2,7 +2,7 @@
 
 面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的电影级角色扮演配图扩展。它会根据当前剧情、在场人物与角色参考图，生成剧照抓拍、表情特写、三视图或全身立绘，并把结果保存在当前聊天与角色图库中。
 
-当前版本：**v2.9.25**
+当前版本：**v2.9.26**
 已验证环境：**SillyTavern 1.18.0**
 
 ## 功能
@@ -27,7 +27,7 @@
 
 前提：已经安装“酒馆助手（JS-Slash-Runner）”。
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.25.json`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.26.json`。
 2. 打开“酒馆助手” → “脚本库”，导入 JSON，并选择“全局脚本”。脚本默认启用，导入后会立即检查安装状态。
 3. 安装器会自动从本仓库安装或更新完整扩展并刷新页面；若发现旧目录 `rp-cinematic-v2`，会先装好正式版，再移除旧目录并保留现有设置。
 4. 以后需要更新时，点击脚本按钮“安装 / 更新 RP 电影配图”。
@@ -45,7 +45,7 @@
 
 ### 使用 ZIP 手动安装
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.25.zip`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.26.zip`。
 2. 解压后得到 `rp-cinematic-imagegen` 文件夹。
 3. 把该文件夹复制到：
 
@@ -138,3 +138,5 @@ npm run build
 Gemini 图片模型在 OpenAI 兼容后端下会读取 `/models` 的 `supported_endpoint_types`，选择服务声明的 Chat 或 Gemini 协议。服务端 404、鉴权或限流仍会明确报错，不代表插件可以修复上游渠道配置。
 
 失败后再次生成前，可在悬浮面板或设置 → 镜头与构图的“失败重试方式”选择：沿用上次提示词仅重试生图，或重新分析并生成（重 roll）。默认沿用；成功出图后的下一次生成仍重新分析。选择会保存。
+
+“导入图片 / 参考图包到当前角色”同时支持 JPG、PNG、WebP、GIF 和 JSON 参考图包，可多选，单张图片最多 15MB、每批最多 10 个文件且总计不超过 30MB。图片数据直接保存在当前浏览器参考图库并显示预览，无需先转成 JSON。

@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.25
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.26
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -33,7 +33,7 @@ import {
     timeoutSignal,
 } from './src/utils.js';
 import { initializeFloatingUI, keepFloatingUIVisible, placeFloatingElement, viewportBounds, fitViewportOverlay } from './src/floating-ui.js';
-import { exportReferenceArchive, parseReferenceArchive, MAX_REFERENCE_ARCHIVE_BYTES } from './src/reference-transfer.js';
+import { exportReferenceArchive, readReferenceImport, MAX_REFERENCE_ARCHIVE_BYTES } from './src/reference-transfer.js';
 import { createImageRetryCache, imageRetrySignature } from './src/image-retry.js';
 
 import {
@@ -1504,7 +1504,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.25</span>
+            <span class="rpig-header-version">v2.9.26</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2145,73 +2145,10 @@ function buildSettingsUI() {
         fileInput.trigger('click');
     });
     fileInput.on('click', (e) => { e.stopPropagation(); });
-    fileInput.on('change', async function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (e.originalEvent) e.originalEvent.stopImmediatePropagation();
-        const liveChar = getCurrentCharacter();
-        if (!liveChar) {
-            toastr.warning('请先选择绑定的角色');
-            return;
-        }
-        let files = Array.from(this.files || []);
-        if (!files.length) return;
-
-        if (files.length > MAX_BATCH_UPLOAD) {
-            toastr.warning(`单次批量上传最多 ${MAX_BATCH_UPLOAD} 张，已自动截取前 ${MAX_BATCH_UPLOAD} 张`);
-            files = files.slice(0, MAX_BATCH_UPLOAD);
-        }
-
-        let views;
-        try { views = await getCharacterRefs(liveChar); }
-        catch (error) { toastr.error(escapeHtml(error.message)); this.value = ''; return; }
-        let count = 0;
-        for (const file of files) {
-            if (views.length >= MAX_REFS_PER_CHAR) {
-                toastr.warning(`该角色参考图已达上限 (${MAX_REFS_PER_CHAR} 张)`);
-                break;
-            }
-            if (!file.type.startsWith('image/')) {
-                toastr.warning(`跳过非图片文件：${escapeHtml(file.name)}`);
-                continue;
-            }
-            if (file.size > MAX_UPLOAD_FILE_SIZE) {
-                toastr.warning(`图片 ${escapeHtml(file.name)} 超过 15MB 限制，已跳过`);
-                continue;
-            }
-            const dataUrl = await blobToDataUrl(file);
-            let persistedUrl = '';
-            try {
-                persistedUrl = await persistMediaUrl(dataUrl, liveChar.name, {
-                    saveBase64AsFile,
-                    fetchToDataUrl,
-                });
-            } catch (upErr) {
-                toastr.warning(`图片 ${escapeHtml(file.name)} 保存到服务器失败，已跳过：${escapeHtml(upErr.message || upErr)}`);
-                continue;
-            }
-
-            if (!views.some(v => v.url === persistedUrl)) {
-                views.push({ url: persistedUrl, label: file.name.replace(/\.[^.]+$/, '') });
-                count++;
-            }
-        }
-        if (count > 0) {
-            try {
-                await saveCharacterRefs(liveChar, views);
-                refreshRefsList();
-                toastr.success(`✅ 已为「${liveChar.name || '角色'}」保存 ${count} 张参考图`);
-            } catch (saveErr) {
-                toastr.error(`参考图保存失败：${escapeHtml(saveErr.message)}`);
-            }
-        }
-        this.value = '';
-    });
-
     card6.body.append(uploadBtn).append(fileInput);
     const exportRefsBtn = $('<button type="button" class="menu_button">导出当前角色参考图包</button>');
-    const importRefsBtn = $('<button type="button" class="menu_button">导入参考图包到当前角色</button>');
-    const importRefsInput = $('<input type="file" accept=".json,application/json" style="display:none">');
+    const importRefsBtn = $('<button type="button" class="menu_button">🖼 导入图片 / 参考图包到当前角色</button>');
+    const importRefsInput = $('<input type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.json,application/json" multiple style="display:none">');
     exportRefsBtn.on('click', async () => {
         const character = getCurrentCharacter();
         if (!character) return toastr.warning('请先选择角色');
@@ -2225,13 +2162,18 @@ function buildSettingsUI() {
         } catch (error) { console.error('[RP 电影配图] 参考图导出失败:', error); toastr.error(escapeHtml(error.message)); }
     });
     importRefsBtn.on('click', () => importRefsInput.trigger('click'));
-    importRefsInput.on('change', async function () {
-        const character = getCurrentCharacter(); const file = this.files?.[0];
+    const handleReferenceImport = async function (e) {
+        e?.preventDefault();
+        e?.stopPropagation();
+        e?.originalEvent?.stopImmediatePropagation();
+        const character = getCurrentCharacter(); const files = Array.from(this.files || []);
         try {
             if (!character) throw new Error('请先选择角色');
-            if (!file) return;
-            if (file.size > MAX_REFERENCE_ARCHIVE_BYTES) throw new Error('参考图包超过 30MB');
-            const imported = parseReferenceArchive(await file.text());
+            if (!files.length) return;
+            if (files.length > MAX_BATCH_UPLOAD) throw new Error('单次最多导入 10 个图片或参考图包文件');
+            if (files.reduce((total, file) => total + file.size, 0) > MAX_REFERENCE_ARCHIVE_BYTES) throw new Error('本次导入总大小超过 30MB，请分批导入');
+            const imported = [];
+            for (const file of files) imported.push(...await readReferenceImport(file));
             const existing = await getCharacterRefs(character);
             if (existing.length + imported.length > MAX_REFS_PER_CHAR) throw new Error('导入后将超过 50 张参考图上限，请先整理参考图');
             // Store embedded bytes so an archive works across independent phone/PC servers.
@@ -2239,7 +2181,9 @@ function buildSettingsUI() {
             await refreshRefsList(); toastr.success(`已导入 ${imported.length} 张参考图`);
         } catch (error) { console.error('[RP 电影配图] 参考图导入失败:', error); toastr.error(escapeHtml(error.message)); }
         finally { this.value = ''; }
-    });
+    };
+    fileInput.on('change', handleReferenceImport);
+    importRefsInput.on('change', handleReferenceImport);
     card6.body.append(exportRefsBtn, importRefsBtn, importRefsInput);
     card6.body.append(refsList);
     grid.append(card6.card);
@@ -2255,7 +2199,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.25</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.26</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2655,7 +2599,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.25</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.26</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2746,5 +2690,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.25] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.26] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
 });

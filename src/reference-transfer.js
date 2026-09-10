@@ -1,7 +1,25 @@
 import { hydrateReferenceImages } from './backends.js';
-import { dataUrlToBlob, RpigError } from './utils.js';
+import { blobToDataUrl, dataUrlToBlob, RpigError } from './utils.js';
 
 export const MAX_REFERENCE_ARCHIVE_BYTES = 30 * 1024 * 1024;
+
+export async function readReferenceImport(file, convert = blobToDataUrl) {
+    if (!file || !file.size || file.size > MAX_REFERENCE_ARCHIVE_BYTES) throw new RpigError('REFERENCE_IMPORT_INVALID', '导入文件为空或超过 30MB');
+    const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+    const ascii = (start, end) => String.fromCharCode(...head.slice(start, end));
+    const mime = head[0] === 255 && head[1] === 216 && head[2] === 255 ? 'image/jpeg'
+        : [137,80,78,71,13,10,26,10].every((n,i) => head[i] === n) ? 'image/png'
+        : /GIF8[79]a/.test(ascii(0,6)) ? 'image/gif'
+        : ascii(0,4) === 'RIFF' && ascii(8,12) === 'WEBP' ? 'image/webp' : '';
+    if (mime) {
+        if (file.size > 15 * 1024 * 1024) throw new RpigError('REFERENCE_IMPORT_INVALID', '单张参考图不能超过 15MB');
+        // Android file providers may omit MIME types; identify bytes instead.
+        const dataUrl = await convert(new Blob([file], { type: mime }));
+        return [{ label: String(file.name || '导入图片').replace(/\.[^.]+$/, '').slice(0,160), dataUrl }];
+    }
+    if (/\.json$/i.test(file.name || '') || file.type === 'application/json') return parseReferenceArchive(await file.text());
+    throw new RpigError('REFERENCE_IMPORT_INVALID', '请选择 JPG、PNG、WebP、GIF 图片或导出的 JSON 参考图包；文件内容不是支持的图片格式');
+}
 
 export async function exportReferenceArchive(refs, fetchImage) {
     const hydrated = await hydrateReferenceImages(refs, fetchImage, 50);
