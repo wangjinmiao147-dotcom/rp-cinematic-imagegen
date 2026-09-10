@@ -1,0 +1,72 @@
+# Android 真机修复与验证
+
+## 2026-09-10 的证据及边界
+
+设备为 Android 16，小米浏览器 20.26.1040901，Chromium 135.0.7049.79；通过 USB ADB 与浏览器真实 CDP 端点连接。不是桌面设备视口模拟，也不是独立 Google Chrome App 的实测认证。
+
+1. v2.9.21 的 `.rpig-fab` 已存在，display 为 flex、visibility 为 visible，但 top=-126px、bottom=-82px，完全位于屏幕上方。祖先 html 的高度为 0，transform 是单位矩阵，perspective 为 1000px。fixed 元素的 bottom 定位相对于该包含块，不能靠 display/z-index 修好。
+2. 改用可视视口坐标并校正包含块偏移后，FAB top=562.923px、bottom=606.923px，可视视口高 688.923px，elementFromPoint 命中 FAB。用户确认界面恢复。修改版整体重新加载检查中 FAB 数量为 1、设置面板存在、没有本插件初始化异常。
+3. 用户图片服务 `/v1/models` 的真实 OPTIONS=204、GET=200。只能证明当时该路由及其预检成功，不能证明 edits/generations 成功，也不能把之前的 Failed to fetch 判为 CORS。
+4. 当前手机剧情 LLM 配置为复用酒馆 LLM。文本请求与插件直连图片请求是不同执行路径。
+5. 手机控制台另有 `mobile` 扩展重复声明、forumUIReady 未定义，以及 tts 的 SpeechSynthesisUtterance 未定义；这些不属于本插件。不能据此宣称本插件的网络故障原因已确定。
+
+本次没有获得原生产 edits/generations 或 LLM 的失败请求，也没有宣称生产图片生成已验证成功。需要用原接口实际生成一次验证。
+
+## 改动
+
+- 悬浮工作台使用 visualViewport 坐标，并在 resize、orientationchange、pageshow 和可视视口滚动/变化时约束在屏幕内；不修改酒馆或其他扩展的 html/body 样式。
+- 悬浮球与设置面板初始化错误显示给用户，并在 Console 保留异常堆栈。
+- 参考图读取/转换/下载失败立即停止；edits 错误不再改为调用 generations。
+- 仅在响应明确提到 input_fidelity 且 HTTP 400/422 时，去掉该可选字段重试 edits；仍保留原响应原因。
+- IndexedDB 的读取错误、事务中止、保存错误、打开阻塞分别报告，修复原保存回调缺少 reject 的问题。真正没有记录时仍返回空列表，界面注明这是当前浏览器的状态。
+- 参考图包包含图片字节，不依赖另一设备的服务器路径，不包含 API 配置；导入追加到当前选中角色。包上限 30MB，每角色上限 50 张。IndexedDB 本身仍不跨设备自动同步。
+- 旧版 WebView 缺少 AbortSignal.timeout/any 时使用兼容实现，超时与用户取消分开处理。
+
+## 错误含义
+
+| 错误码 | 含义与处理 |
+| --- | --- |
+| NETWORK_FAILED | fetch 未提供可读 HTTP 响应。Console/Network 检查 CORS、DNS、TLS、混合内容、连接状态。单凭 Failed to fetch 无法区分。 |
+| REQUEST_TIMEOUT | 请求超时。 |
+| EDITS_NOT_FOUND | HTTP 404：先查 API 根地址、路由和模型，不能只凭 404 认定模型不支持 edits。 |
+| EDITS_UNSUPPORTED | HTTP 405/501：服务不接受该方法或未实现该接口，保留响应正文。 |
+| EDITS_HTTP / EDITS_EMPTY_RESPONSE | edits 返回其他错误，或成功响应缺少图片。保留 HTTP 状态、脱敏正文，停止生成。 |
+| REFERENCE_MISSING / REFERENCE_INVALID | 参考图记录缺失或图片数据无效。重新上传或导入完整图片。 |
+| REFERENCE_STORAGE_READ_FAILED / WRITE_FAILED | IndexedDB 读写故障，不能当作空图库。 |
+| REFERENCE_DOWNLOAD_FAILED / REFERENCE_AVATAR_FAILED | 指定参考图/角色卡原图无法读取，停止生成。 |
+| TEMP_IMAGE_DOWNLOAD_FAILED | 生成接口已返回链接，但下载成图失败。单独检查 CDN 的 CORS、有效期或 HTTP 状态。 |
+
+若生产接口的 Console 明确提示 CORS，需在 API 服务端允许实际酒馆 Origin、Authorization/Content-Type 和对应方法，或使用自己控制的同源服务端转发。前端 `no-cors` 无法读取 API 响应，不是修复方法。不要把用户密钥交给公共代理。
+
+## 本地测试
+
+```sh
+npm ci
+npm test
+npm run check
+```
+
+48 项测试包括真实调用函数的错误分支测试和 fake-indexeddb 事务故障测试，原 CSS 检查仅作为补充。
+
+## 可重复的 Android CDP 测试
+
+需要 Node.js 22+（脚本使用内置 WebSocket），手机实际打开酒馆，USB 调试已授权。安装插件不需要 Node.js 测试依赖。
+
+1. `adb devices -l` 确认真实手机为 device。
+2. 从 `adb shell cat /proc/net/unix` 找到浏览器的 devtools socket；小米浏览器本次为 `browser_webview_devtools_remote_<pid>`，标准 Chrome 常为 `chrome_devtools_remote`。不要写死旧 PID。
+3. `adb forward tcp:9223 localabstract:<实际 socket 名>`。`http://127.0.0.1:9223/json/list` 中应有标题为 SillyTavern 的页面；只保留一个待测酒馆页以避免歧义。
+4. 开一个电脑终端执行 `npm run test:android:server`，并执行 `adb reverse tcp:18765 tcp:18765`。
+5. 酒馆应以 `http://127.0.0.1:8000` 打开（测试服务仅允许该 Origin）；其他地址请同时调整测试服务允许的 Origin。
+6. 在另一个终端执行 `npm run test:android`，可通过 `RPIG_CDP_URL` 改 CDP 地址，`RPIG_ANDROID_REPORT` 改报告路径。默认写入 android-test-results.json。
+
+脚本通过 CDP 将当前仓库模块加载到真实手机页面，使用本地受控 HTTP 服务测试 multipart、404/405/500、CORS 预检拒绝、图片 410 及实际 IndexedDB。只使用 fixture 密钥，不调用生产模型。参考图数据库名称替换为独立测试数据库并在结束后删除，用户参考图库保持原样。FAB 定位会在当前页生效；该测试不替代安装后的整体插件启动检查。
+
+11 项真机测试通过，其中两条受控 CORS 请求的 CDP 失败原因均为 `PreflightMissingAllowOriginHeader`。该结果验证错误分支，不用于反推原生产故障。
+
+## 安装后仍需验证
+
+- 在手机扩展管理中更新仓库版本并刷新，确认版本 v2.9.22；调试会话的临时注入不会替代安装更新。
+- 横竖屏、地址栏伸缩、键盘打开/关闭、拖拽悬浮球及面板滚动。
+- 原生产 LLM、带角色参考图 edits、无参考图 generations，以及输出临时 URL 下载并保存的完整流程。
+- PC 导出参考图包，在手机同一角色导入后生成一次；不同浏览器/不同服务器不应依赖相同 IndexedDB 或绝对本地路径。
+- 如需要 Google Chrome App 与其他 WebView 的认证，分别在相应真实 App 中复验；不能把小米浏览器内核版本当作全部浏览器兼容证明。

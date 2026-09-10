@@ -73,6 +73,8 @@ try {
     }
     Get-ChildItem -LiteralPath (Join-Path $repoRoot 'src') -Filter '*.js' -File |
         Copy-Item -Destination (Join-Path $bundleRoot 'src')
+    New-Item -ItemType Directory -Path (Join-Path $bundleRoot 'docs') -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\android-debugging.md') -Destination (Join-Path $bundleRoot 'docs')
 
     Compress-Archive -LiteralPath $bundleRoot -DestinationPath $archivePath -CompressionLevel Optimal
     Copy-Item -LiteralPath $installerSource -Destination $installerPath

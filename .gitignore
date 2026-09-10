@@ -7,3 +7,4 @@ Thumbs.db
 backup*/
 *.backup*/
 index.v*.js
+android-test-results.json

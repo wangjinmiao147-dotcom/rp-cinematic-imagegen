@@ -10,6 +10,7 @@ import {
     scrubSensitiveText,
     throwIfAborted,
     timeoutSignal,
+    requestFailure,
 } from './utils.js';
 
 export function extractChatCompletionText(data) {
@@ -112,7 +113,7 @@ export async function callLLM(system, user, settings, getContextFn, options = {}
         }
     } catch (netErr) {
         if (isAbortError(netErr)) throw netErr;
-        throw new Error(`LLM 连接失败：${scrubSensitiveText(netErr.message, [key])}`);
+        throw requestFailure(netErr, `${base}/chat/completions`, '独立 LLM 连接失败', [key]);
     }
 
     if (!res.ok) {

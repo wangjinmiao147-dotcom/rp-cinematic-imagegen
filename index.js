@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.21
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.22
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -29,7 +29,11 @@ import {
     isAbortError,
     throwIfAborted,
     hasConfiguredGenerationSettings,
+    RpigError,
+    timeoutSignal,
 } from './src/utils.js';
+import { initializeFloatingUI, keepFloatingUIVisible, placeFloatingElement, viewportBounds } from './src/floating-ui.js';
+import { exportReferenceArchive, parseReferenceArchive, MAX_REFERENCE_ARCHIVE_BYTES } from './src/reference-transfer.js';
 
 import {
     DEFAULT_SD_NEGATIVE,
@@ -309,18 +313,16 @@ async function getCharacterAvatarDataUrl(character) {
     }
     urls.push(`/thumbnail?type=avatar&file=${encodeURIComponent(character.avatar)}`);
 
-    for (const url of urls) {
+    const errors = [];
+    for (const url of [...new Set(urls)]) {
         try {
-            const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
-            if (res.ok) {
-                const blob = await res.blob();
-                if (blob && blob.size > 100) {
-                    return await blobToDataUrl(blob);
-                }
-            }
-        } catch { /* try next */ }
+            return await fetchToDataUrl(url, { timeoutMs: 6000 });
+        } catch (error) {
+            errors.push(error.message);
+            console.warn('[RP 电影配图] 角色卡参考图读取失败:', error);
+        }
     }
-    return null;
+    throw new RpigError('REFERENCE_AVATAR_FAILED', `角色卡原图和缩略图均读取失败，已停止生成。${errors.join('；')}`);
 }
 
 function migrateLegacyMedia(message) {
@@ -414,7 +416,9 @@ async function openGallery(characterOrId) {
     if (!character) character = getCurrentCharacter();
 
     const charName = character ? (character.name || '角色') : '当前会话';
-    const allImages = await getAllImagesForCharacter(character, getContext);
+    let allImages;
+    try { allImages = await getAllImagesForCharacter(character, getContext); }
+    catch (error) { toastr.error(`图库读取失败：${escapeHtml(error.message)}`); return; }
 
     const overlay = $(`<div class="rpig-gallery-overlay">
         <div class="rpig-gallery-header">
@@ -1036,7 +1040,8 @@ async function executeGenerationTask(task) {
                 });
             } catch (pErr) {
                 if (isAbortError(pErr)) throw pErr;
-                toastr.warning(`图片持久化失败，使用临时 Data URL：${escapeHtml(pErr.message || pErr)}`);
+                console.error('[RP 电影配图] 图片持久化失败:', pErr);
+                toastr.warning(`图片未保存到酒馆，仅保留临时预览，下次连续性参考可能不可用：${escapeHtml(pErr.message || pErr)}`, '', { timeOut: 12000 });
                 persistedUrl = rawImageData;
             }
 
@@ -1371,7 +1376,7 @@ async function requestUpstreamModels(url, key, authHeader = 'Authorization') {
     try {
         response = await fetch(url, {
             headers,
-            signal: AbortSignal.timeout(UPSTREAM_MODELS_TIMEOUT_MS),
+            signal: timeoutSignal(UPSTREAM_MODELS_TIMEOUT_MS),
         });
     } catch (error) {
         if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
@@ -1460,7 +1465,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.21</span>
+            <span class="rpig-header-version">v2.9.22</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -1957,11 +1962,17 @@ function buildSettingsUI() {
     </div>`);
 
     const refsList = $(document.createElement('div')).addClass('rpig-refs-list');
-    const refsEmpty = $(document.createElement('div')).addClass('rpig-ref-empty').text('暂无多视图参考图，点击下方按钮上传或生成');
+    const refsEmpty = $(document.createElement('div')).addClass('rpig-ref-empty').text('此设备/浏览器暂无多视图参考图。IndexedDB 不会跨设备同步；请上传原图，或从另一设备导出参考图后导入。');
 
     async function refreshRefsList() {
         const liveChar = getCurrentCharacter();
-        const views = liveChar ? await getCharacterRefs(liveChar) : [];
+        let views;
+        try { views = liveChar ? await getCharacterRefs(liveChar) : []; }
+        catch (error) {
+            refsList.empty().append($('<div class="rpig-ref-empty">').text(error.message));
+            toastr.error(escapeHtml(error.message));
+            return;
+        }
         refsList.empty();
         if (!views.length) {
             refsList.append(refsEmpty);
@@ -1977,7 +1988,7 @@ function buildSettingsUI() {
                         await saveCharacterRefs(liveChar, views);
                         refreshRefsList();
                     } catch (e) {
-                        toastr.error('删除参考图失败');
+                        toastr.error(`删除参考图失败：${escapeHtml(e.message)}`);
                     }
                 });
                 item.append(img, label, del);
@@ -2102,7 +2113,9 @@ function buildSettingsUI() {
             files = files.slice(0, MAX_BATCH_UPLOAD);
         }
 
-        const views = await getCharacterRefs(liveChar);
+        let views;
+        try { views = await getCharacterRefs(liveChar); }
+        catch (error) { toastr.error(escapeHtml(error.message)); this.value = ''; return; }
         let count = 0;
         for (const file of files) {
             if (views.length >= MAX_REFS_PER_CHAR) {
@@ -2140,13 +2153,45 @@ function buildSettingsUI() {
                 refreshRefsList();
                 toastr.success(`✅ 已为「${liveChar.name || '角色'}」保存 ${count} 张参考图`);
             } catch (saveErr) {
-                toastr.error('参考图保存到本地数据库失败');
+                toastr.error(`参考图保存失败：${escapeHtml(saveErr.message)}`);
             }
         }
         this.value = '';
     });
 
     card6.body.append(uploadBtn).append(fileInput);
+    const exportRefsBtn = $('<button type="button" class="menu_button">导出当前角色参考图包</button>');
+    const importRefsBtn = $('<button type="button" class="menu_button">导入参考图包到当前角色</button>');
+    const importRefsInput = $('<input type="file" accept=".json,application/json" style="display:none">');
+    exportRefsBtn.on('click', async () => {
+        const character = getCurrentCharacter();
+        if (!character) return toastr.warning('请先选择角色');
+        try {
+            const refs = await getCharacterRefs(character);
+            if (!refs.length) return toastr.info('此浏览器没有可导出的参考图');
+            const text = await exportReferenceArchive(refs, fetchToDataUrl);
+            const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+            const a = document.createElement('a'); a.href = url; a.download = 'rpig-references.json';
+            document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (error) { console.error('[RP 电影配图] 参考图导出失败:', error); toastr.error(escapeHtml(error.message)); }
+    });
+    importRefsBtn.on('click', () => importRefsInput.trigger('click'));
+    importRefsInput.on('change', async function () {
+        const character = getCurrentCharacter(); const file = this.files?.[0];
+        try {
+            if (!character) throw new Error('请先选择角色');
+            if (!file) return;
+            if (file.size > MAX_REFERENCE_ARCHIVE_BYTES) throw new Error('参考图包超过 30MB');
+            const imported = parseReferenceArchive(await file.text());
+            const existing = await getCharacterRefs(character);
+            if (existing.length + imported.length > MAX_REFS_PER_CHAR) throw new Error('导入后将超过 50 张参考图上限，请先整理参考图');
+            // Store embedded bytes so an archive works across independent phone/PC servers.
+            await saveCharacterRefs(character, [...existing, ...imported]);
+            await refreshRefsList(); toastr.success(`已导入 ${imported.length} 张参考图`);
+        } catch (error) { console.error('[RP 电影配图] 参考图导入失败:', error); toastr.error(escapeHtml(error.message)); }
+        finally { this.value = ''; }
+    });
+    card6.body.append(exportRefsBtn, importRefsBtn, importRefsInput);
     card6.body.append(refsList);
     grid.append(card6.card);
 
@@ -2161,7 +2206,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.21</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.22</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2304,12 +2349,7 @@ function buildFloatingUI() {
                 const maxT = Math.max(0, window.innerHeight - h);
                 const newL = Math.max(0, Math.min(maxL, startLeft + dx));
                 const newT = Math.max(0, Math.min(maxT, startTop + dy));
-                element.css({
-                    left: `${newL}px`,
-                    top: `${newT}px`,
-                    right: 'auto',
-                    bottom: 'auto',
-                });
+                placeFloatingElement(element[0], { left: newL, top: newT });
             }
         };
 
@@ -2367,7 +2407,7 @@ function buildFloatingUI() {
             const rect = panel[0].getBoundingClientRect();
             const clampedL = Math.max(8, Math.min(window.innerWidth - pW - 8, rect.left));
             const clampedT = Math.max(8, Math.min(window.innerHeight - pH - 8, rect.top));
-            panel.css({ left: `${clampedL}px`, top: `${clampedT}px`, right: 'auto', bottom: 'auto' });
+            placeFloatingElement(panel[0], { left: clampedL, top: clampedT });
             return;
         }
 
@@ -2384,12 +2424,7 @@ function buildFloatingUI() {
             top = Math.max(10, window.innerHeight - pH - 10);
         }
 
-        panel.css({
-            left: `${left}px`,
-            top: `${top}px`,
-            right: 'auto',
-            bottom: 'auto',
-        });
+        placeFloatingElement(panel[0], { left, top });
     }
 
     // 绑定悬浮按钮拖拽
@@ -2404,9 +2439,10 @@ function buildFloatingUI() {
         if (panel.is(':visible')) {
             panel.hide();
         } else {
-            positionPanelNearFab();
             refreshStatus();
             panel.show();
+            panel[0].style.maxHeight = `${Math.max(80, viewportBounds().height - 24)}px`;
+            positionPanelNearFab();
         }
     }
 
@@ -2528,6 +2564,8 @@ function buildFloatingUI() {
     });
 
     $('#rpig-open-settings').on('click', openSettingsPanel);
+    window.rpigFloatingCleanup?.();
+    window.rpigFloatingCleanup = keepFloatingUIVisible(fab[0], panel[0]);
 }
 
 function openSettingsPanel() {
@@ -2555,7 +2593,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.21</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.22</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2635,9 +2673,15 @@ jQuery(async function () {
         }
     });
 
-    try { buildFloatingUI(); } catch { /* ignore */ }
-    try { mountSettingsPanel(); } catch { /* ignore */ }
+    initializeFloatingUI(buildFloatingUI, error => {
+        console.error('[RP 电影配图] 悬浮球初始化失败:', error);
+        toastr.error(`悬浮球初始化失败：${escapeHtml(error.message)}。请查看 Console 的异常堆栈`, '', { timeOut: 12000 });
+    });
+    try { mountSettingsPanel(); } catch (error) {
+        console.error('[RP 电影配图] 设置面板初始化失败:', error);
+        toastr.error(`设置面板初始化失败：${escapeHtml(error.message)}`);
+    }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.21] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.22] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
 });

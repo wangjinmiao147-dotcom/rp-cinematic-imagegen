@@ -1,3 +1,11 @@
+# v2.9.22 — Android 真机定位与参考图错误处理
+
+- 根据小米浏览器真机调试修复零高度、带 transform/perspective 的根元素导致悬浮球出屏；处理 visualViewport 变化。
+- 悬浮球初始化异常保留堆栈；参考图读取、下载、edits HTTP/网络错误不再静默降级文生图。
+- 区分 edits 404 路由缺失、405/501 不支持、网络原因待诊断、临时成图下载失败。
+- 修复参考图库读写失败/中止回调，增加完整图片参考图包导出与导入。
+- 新增行为测试、IndexedDB 故障测试及可重复的 Android CDP 真机测试。详见 docs/android-debugging.md。
+
 # 更新日志
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。

@@ -2,7 +2,7 @@
 // RP 电影配图 - 图库与多视图持久化模块
 // ============================================================
 
-import { blobToDataUrl, stripHtml } from './utils.js';
+import { blobToDataUrl, stripHtml, RpigError, isAbortError, scrubSensitiveText } from './utils.js';
 
 const REFS_DB_NAME = 'rpig-refs';
 const REFS_STORE = 'refs';
@@ -196,7 +196,8 @@ export async function persistMediaUrl(rawUrl, characterName = 'character', optio
         try {
             fetchedDataUrl = await fetchFn(rawUrl);
         } catch (fetchErr) {
-            throw new Error(`远程临时图片下载失败：${fetchErr.message || fetchErr}`);
+            if (isAbortError(fetchErr)) throw fetchErr;
+            throw new RpigError('TEMP_IMAGE_DOWNLOAD_FAILED', `生成接口已返回图片链接，但临时图片无法下载：${scrubSensitiveText(fetchErr.message || String(fetchErr))}。这不是 edits 不支持；请检查下载请求的 CORS、链接有效期与 HTTP 状态`, { reason: fetchErr.code || fetchErr.name });
         }
 
         const parsed = parseDataUrl(fetchedDataUrl);
@@ -228,36 +229,46 @@ export function openRefsDB() {
             return reject(new Error('IndexedDB 不可用'));
         }
         const request = indexedDB.open(REFS_DB_NAME, 1);
+        let abandoned = false;
+        const timer = setTimeout(() => { abandoned = true; reject(new RpigError('REFERENCE_STORAGE_BLOCKED', '参考图库打开超时，请关闭其他酒馆标签页后重试')); }, 10000);
         request.onupgradeneeded = () => {
             request.result.createObjectStore(REFS_STORE, { keyPath: 'characterId' });
         };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
+        request.onsuccess = () => { clearTimeout(timer); if (abandoned) request.result.close(); else resolve(request.result); };
+        request.onerror = () => { clearTimeout(timer); reject(request.error); };
+        request.onblocked = () => { clearTimeout(timer); abandoned = true; reject(new RpigError('REFERENCE_STORAGE_BLOCKED', '参考图库被其他标签页阻塞，请关闭其他酒馆标签页后重试')); };
     });
 }
 
 export async function getCharacterRefs(characterOrId) {
     const key = getCharacterIdentifier(characterOrId);
     if (!key || key === 'default') return [];
+    let db;
     try {
-        const db = await openRefsDB();
-        return new Promise((resolve) => {
+        db = await openRefsDB();
+        return await new Promise((resolve, reject) => {
             const tx = db.transaction(REFS_STORE, 'readonly');
             const req = tx.objectStore(REFS_STORE).get(key);
-            req.onsuccess = () => resolve(Array.isArray(req.result?.views) ? req.result.views : []);
-            req.onerror = () => resolve([]);
+            let views = [];
+            req.onsuccess = () => { views = Array.isArray(req.result?.views) ? req.result.views : []; };
+            req.onerror = () => reject(req.error);
+            tx.oncomplete = () => { db.close(); resolve(views); };
+            tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('参考图读取事务已中止')); };
         });
-    } catch {
-        return [];
-    }
+    } catch (error) {
+        const failure = new RpigError('REFERENCE_STORAGE_READ_FAILED', `参考图库读取失败：${error?.name || 'Error'}：${error?.message || error}。读取失败不等于没有参考图`, { reason: error?.code || error?.name });
+        console.error('[RP 电影配图]', failure);
+        throw failure;
+    } finally { db?.close(); }
 }
 
 export async function saveCharacterRefs(characterOrId, views) {
     const key = getCharacterIdentifier(characterOrId);
     if (!key || key === 'default') return;
+    let db;
     try {
-        const db = await openRefsDB();
-        return new Promise((resolve) => {
+        db = await openRefsDB();
+        return await new Promise((resolve, reject) => {
             const tx = db.transaction(REFS_STORE, 'readwrite');
             // 只保留 url 与 label，清理冗余的大 base64
             const cleanViews = (views || []).slice(0, MAX_REFS_PER_CHAR).map(v => {
@@ -268,15 +279,14 @@ export async function saveCharacterRefs(characterOrId, views) {
                 return item;
             });
             tx.objectStore(REFS_STORE).put({ characterId: key, views: cleanViews });
-            tx.oncomplete = () => resolve();
-            tx.onerror = (e) => reject(e);
+            tx.oncomplete = () => { db.close(); resolve(); };
+            tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('参考图保存事务已中止')); };
         });
     } catch (e) {
-        if (typeof indexedDB !== 'undefined') {
-            console.error('[RP 电影配图] 保存参考图失败:', e);
-            throw e;
-        }
-    }
+        const failure = new RpigError('REFERENCE_STORAGE_WRITE_FAILED', `参考图保存失败：${e?.name || 'Error'}：${e?.message || e}`);
+        console.error('[RP 电影配图]', failure);
+        throw failure;
+    } finally { db?.close(); }
 }
 
 // ------------------------------------------------------------
@@ -416,7 +426,7 @@ export async function getAllImagesForCharacter(character, getContextFn) {
                 if (r?.dataUrl || r?.url) addImg(r.url || r.dataUrl, r.label || '形象参考图', Date.now());
             }
         }
-    } catch { /* ignore */ }
+    } catch (error) { console.error('[RP 电影配图] 图库中的参考图读取失败:', error); throw error; }
 
     // 3. 聚合 IndexedDB 独立图库记录
     try {
@@ -450,7 +460,7 @@ export async function deleteImageCompletely(character, targetUrl, getContextFn) 
             if (filteredRefs.length !== refs.length) {
                 await saveCharacterRefs(character, filteredRefs);
             }
-        } catch { /* ignore */ }
+        } catch (error) { console.error('[RP 电影配图] 删除参考图失败:', error); throw error; }
     }
 
     // 3. 从当前聊天消息 extra.media 中清除并保存会话

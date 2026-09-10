@@ -18,9 +18,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Install test dependencies
+        run: npm ci
       - name: Validate source
         run: npm run check
-      - name: Test cancellation paths
+      - name: Test behavior and cancellation paths
         run: npm test
       - name: Build SillyTavern package
         run: npm run build

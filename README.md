@@ -2,7 +2,7 @@
 
 面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的电影级角色扮演配图扩展。它会根据当前剧情、在场人物与角色参考图，生成剧照抓拍、表情特写、三视图或全身立绘，并把结果保存在当前聊天与角色图库中。
 
-当前版本：**v2.9.21**
+当前版本：**v2.9.22**
 已验证环境：**SillyTavern 1.18.0**
 
 ## 功能
@@ -27,7 +27,7 @@
 
 前提：已经安装“酒馆助手（JS-Slash-Runner）”。
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.21.json`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.22.json`。
 2. 打开“酒馆助手” → “脚本库”，导入 JSON，并选择“全局脚本”。脚本默认启用，导入后会立即检查安装状态。
 3. 安装器会自动从本仓库安装或更新完整扩展并刷新页面；若发现旧目录 `rp-cinematic-v2`，会先装好正式版，再移除旧目录并保留现有设置。
 4. 以后需要更新时，点击脚本按钮“安装 / 更新 RP 电影配图”。
@@ -45,7 +45,7 @@
 
 ### 使用 ZIP 手动安装
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.21.zip`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.22.zip`。
 2. 解压后得到 `rp-cinematic-imagegen` 文件夹。
 3. 把该文件夹复制到：
 
@@ -59,7 +59,7 @@
 
 ### 图片后端
 
-- **OpenAI 兼容**：填写 API 根地址、API Key 和图片模型。支持 `/images/generations`，并会在可用时使用 `/images/edits` 做参考图编辑。
+- **OpenAI 兼容**：填写 API 根地址、API Key 和图片模型。无参考图时使用 `/images/generations`；有参考图时使用 `/images/edits`，失败会停止并报告原因，不再自动丢弃参考图降级。
 - **Google Gemini**：默认 API 根地址为 `https://generativelanguage.googleapis.com/v1`，密钥通过 `x-goog-api-key` 请求头发送。
 - **SD WebUI**：填写本地地址，例如 `http://127.0.0.1:7860`；WebUI 启动时需启用 API。
 - **ComfyUI**：填写本地地址并提供 API 格式的 Workflow JSON。
@@ -124,3 +124,9 @@ npm run build
 ## 许可证
 
 [MIT License](LICENSE)
+
+## Android 排错与参考图迁移
+
+已在 Android 16 小米浏览器 Chromium 135 的真实远程调试中验证悬浮球根元素定位问题；并非 Chrome 品牌浏览器的实测认证。参考图保存在各浏览器的 IndexedDB 中，不自动同步；在参考图设置内使用“导出当前角色参考图包”和“导入参考图包到当前角色”迁移完整图片。
+
+测试与错误码说明见 [Android 调试文档](docs/android-debugging.md)。开发测试需先运行 `npm ci`，再运行 `npm test` 与 `npm run check`。

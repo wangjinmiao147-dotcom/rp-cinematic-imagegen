@@ -13,6 +13,8 @@ import {
     sleep,
     throwIfAborted,
     timeoutSignal,
+    RpigError,
+    requestFailure,
 } from './utils.js';
 import { DEFAULT_SD_NEGATIVE, preparePromptForBackend } from './prompts.js';
 
@@ -46,7 +48,7 @@ export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, max
 
     for (const ref of refs) {
         throwIfAborted(signal);
-        if (!ref) continue;
+        if (!ref) throw new RpigError('REFERENCE_MISSING', '参考图记录为空，请重新上传或导入参考图');
         if (hydrated.length >= maxRefs) break;
 
         let dataUrl = ref.dataUrl;
@@ -57,11 +59,14 @@ export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, max
                 }
             } catch (err) {
                 if (isAbortError(err)) throw err;
-                console.warn('[RP 电影配图] 参考图水合转换失败:', ref.url, err);
+                throw new RpigError('REFERENCE_DOWNLOAD_FAILED', `参考图下载或转换失败；已停止生图，未降级为文生图。${scrubSensitiveText(err.message)}`, { reason: err.code || err.name });
             }
         }
 
-        if (dataUrl && typeof dataUrl === 'string' && !seen.has(dataUrl)) {
+        if (typeof dataUrl !== 'string' || !/^data:image\/[\w.+-]+;base64,\S+$/i.test(dataUrl)) {
+            throw new RpigError('REFERENCE_MISSING', '参考图没有有效的图片数据或地址，请在此设备重新上传或导入；已停止生图');
+        }
+        if (!seen.has(dataUrl)) {
             seen.add(dataUrl);
             hydrated.push({
                 ...ref,
@@ -126,17 +131,20 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
         headers['Authorization'] = `Bearer ${key}`;
     }
 
-    const hasRefs = Array.isArray(refs) && refs.length > 0 && refs[0].dataUrl;
+    const hasRefs = Array.isArray(refs) && refs.length > 0;
 
     // 1. 如果有参考图，先尝试 multipart/form-data 的 /images/edits
     if (hasRefs) {
-        const editCandidates = refs.slice(0, 2).filter(ref => ref?.dataUrl);
+        if (refs.some(ref => !ref?.dataUrl)) throw new RpigError('REFERENCE_MISSING', '参考图尚未读取，不能继续文生图');
+        const editCandidates = refs.slice(0, 2);
         const shouldUseHighFidelity = options.continuityReference === true && options.sceneChanged !== true;
 
         for (let refIndex = 0; refIndex < editCandidates.length; refIndex++) {
             const currentRef = editCandidates[refIndex];
             try {
-                const blob = dataUrlToBlob(currentRef.dataUrl);
+                let blob;
+                try { blob = dataUrlToBlob(currentRef.dataUrl); }
+                catch (error) { throw new RpigError('REFERENCE_INVALID', `参考图数据无法转换为图片：${error.message}`); }
                 const extension = blob.type === 'image/jpeg'
                     ? 'jpg'
                     : blob.type === 'image/webp'
@@ -162,8 +170,11 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
                 // 连续性模式优先请求高输入保真；第三方不识别该字段时自动重试标准 edits。
                 let res = await requestEdit(shouldUseHighFidelity);
                 if (!res.ok && shouldUseHighFidelity && (res.status === 400 || res.status === 422)) {
-                    onWarning('兼容接口不接受高保真参数，正在使用标准图生图模式重试');
-                    res = await requestEdit(false);
+                    const detail = await res.clone().text();
+                    if (/input_fidelity/i.test(detail)) {
+                        onWarning(`兼容接口拒绝 input_fidelity 参数（HTTP ${res.status}）：${scrubSensitiveText(detail, [key]).slice(0, 200)}；正在使用标准图生图模式重试`);
+                        res = await requestEdit(false);
+                    }
                 }
 
                 if (res.ok) {
@@ -175,36 +186,17 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
                     if (item?.url) {
                         return { imageUrl: item.url, model, usedRefs: true };
                     }
-                    onWarning(refIndex + 1 < editCandidates.length
-                        ? '上游未返回图片，正在改用下一张参考图重试'
-                        : '上游未返回图片，正在降级为文本生图');
-                    continue;
+                    throw new RpigError('EDITS_EMPTY_RESPONSE', '参考图接口返回成功但没有图片数据；已停止，未降级为文生图');
                 }
 
                 const errStatus = res.status;
                 const errBody = await res.text().catch(() => '');
-                if (errStatus === 401 || errStatus === 403 || errStatus === 429) {
-                    throw new Error(`OpenAI Edits HTTP ${errStatus}: ${scrubSensitiveText(errBody, [key]).slice(0, 200)}`);
-                }
-                if (errStatus === 404 || errStatus === 405) {
-                    onWarning('后端不支持 /images/edits 参考图接口，已自动降级为纯文本提示词生成');
-                    break;
-                }
-                if (refIndex + 1 < editCandidates.length) {
-                    onWarning(`参考图 ${refIndex + 1} 生图失败（HTTP ${errStatus}），正在使用下一张参考图重试`);
-                    continue;
-                }
-                onWarning(`参考图生图失败（HTTP ${errStatus}），已自动降级为纯文本提示词生成`);
+                const unsupported = errStatus === 405 || errStatus === 501;
+                throw new RpigError(unsupported ? 'EDITS_UNSUPPORTED' : errStatus === 404 ? 'EDITS_NOT_FOUND' : 'EDITS_HTTP',
+                    `OpenAI Edits HTTP ${errStatus}: ${scrubSensitiveText(errBody, [key]).slice(0, 300)}。${unsupported ? '接口不接受该编辑方法。' : errStatus === 404 ? '请核对 API 根地址、路由与模型是否支持 edits；404 本身不能证明模型不支持。' : ''}已停止，未降级为文生图`, { status: errStatus });
             } catch (editErr) {
                 if (isAbortError(editErr)) throw editErr;
-                if (editErr.message && /OpenAI Edits HTTP (?:401|403|429)/.test(editErr.message)) {
-                    throw editErr;
-                }
-                if (refIndex + 1 < editCandidates.length) {
-                    onWarning('参考图转换或请求失败，正在使用下一张参考图重试');
-                    continue;
-                }
-                onWarning('参考图转换或请求失败，已降级为纯文本提示词生成');
+                throw requestFailure(editErr, `${base}/images/edits`, '参考图 edits 请求失败；未降级为文生图', [key]);
             }
         }
     }
@@ -228,7 +220,7 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
         });
     } catch (netErr) {
         if (isAbortError(netErr)) throw netErr;
-        throw new Error(`网络连接失败：${scrubSensitiveText(netErr.message, [key])}`);
+        throw requestFailure(netErr, `${base}/images/generations`, '图片生成请求失败', [key]);
     }
 
     if (!res.ok) {

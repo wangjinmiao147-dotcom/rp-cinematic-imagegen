@@ -119,7 +119,7 @@ export function scrubSensitiveText(text, sensitiveKeys = []) {
     let result = text;
 
     // 清理 URL 中的 key 参数
-    result = result.replace(/([?&]key=)[^& \n\r"']+/gi, '$1[REDACTED]');
+    result = result.replace(/([?&](?:key|token|api_key|access_token|signature|sig|X-Amz-[\w-]+)=)[^& \n\r"']+/gi, '$1[REDACTED]');
     // 清理 Bearer token
     result = result.replace(/(Bearer\s+)[A-Za-z0-9_\-\.]{6,}/gi, '$1[REDACTED]');
 
@@ -131,6 +131,30 @@ export function scrubSensitiveText(text, sensitiveKeys = []) {
         }
     }
     return result;
+}
+
+export class RpigError extends Error {
+    constructor(code, message, details = {}) {
+        super(`[${code}] ${message}`);
+        this.name = 'RpigError';
+        this.code = code;
+        this.details = details;
+    }
+}
+
+export function safeRequestUrl(raw) {
+    try { const url = new URL(raw, globalThis.location?.href || 'http://localhost'); return url.origin + url.pathname; }
+    catch { return '[无效地址]'; }
+}
+
+export function requestFailure(error, url, stage, sensitiveKeys = []) {
+    if (isAbortError(error) || error instanceof RpigError) return error;
+    const detail = scrubSensitiveText(error?.message || String(error), sensitiveKeys);
+    const endpoint = safeRequestUrl(url);
+    const timeout = error?.name === 'TimeoutError';
+    return new RpigError(timeout ? 'REQUEST_TIMEOUT' : 'NETWORK_FAILED',
+        `${stage}：${endpoint}；${detail}。${timeout ? '请求超时。' : '浏览器未提供可读的 HTTP 响应；可能是 CORS、DNS/TLS、混合内容或网络连接问题，须结合 Console / Network 确认，不能据此判断接口不支持 edits。'}`,
+        { stage, endpoint });
 }
 
 /**
@@ -207,7 +231,11 @@ export function timeoutSignal(ms) {
         return AbortSignal.timeout(ms);
     }
     const controller = new AbortController();
-    setTimeout(() => controller.abort(createAbortError('请求超时')), ms);
+    const timer = setTimeout(() => {
+        const error = new Error('请求超时'); error.name = 'TimeoutError';
+        controller.abort(error);
+    }, ms);
+    timer?.unref?.();
     return controller.signal;
 }
 
@@ -261,10 +289,15 @@ export async function fetchToDataUrl(url, timeoutOrOptions = 30000) {
         : { timeoutMs: timeoutOrOptions };
     const timeoutMs = Number(options.timeoutMs) || 30000;
     const signal = combineAbortSignals(options.signal, timeoutSignal(timeoutMs));
-    const res = await fetch(url, { signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const blob = await res.blob();
-    return await blobToDataUrl(blob);
+    try {
+        const res = await fetch(url, { signal });
+        if (!res.ok) throw new RpigError('IMAGE_DOWNLOAD_HTTP', `图片下载 HTTP ${res.status}：${safeRequestUrl(url)}`, { status: res.status });
+        const blob = await res.blob();
+        if (!blob.size || !/^image\//i.test(blob.type)) {
+            throw new RpigError('IMAGE_DOWNLOAD_INVALID', '下载结果为空或不是图片，请检查地址、登录状态或临时链接是否过期');
+        }
+        return await blobToDataUrl(blob);
+    } catch (error) { throw requestFailure(error, url, '图片下载'); }
 }
 
 /**
