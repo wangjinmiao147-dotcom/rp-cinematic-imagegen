@@ -1328,6 +1328,9 @@ body.rpig-review-open {
 }
 
 .rpig-gallery-header {
+  flex-shrink: 0;
+  max-width: 100%;
+  gap: 8px;
   width: min(96vw, 1120px);
   display: flex;
   align-items: center;
@@ -1337,12 +1340,25 @@ body.rpig-review-open {
 }
 
 .rpig-gallery-header-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.4px;
 }
 
+.rpig-gallery-header #rpig-gallery-close {
+  flex: 0 0 auto;
+  width: auto;
+  white-space: nowrap;
+}
+
 .rpig-gallery-grid {
+  grid-auto-rows: max-content;
+  min-height: 0;
+  max-width: 100%;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   width: min(96vw, 1120px);
   flex: 1;
   overflow-y: auto;
@@ -1371,6 +1387,7 @@ body.rpig-review-open {
 }
 
 .rpig-gallery-card img {
+  flex-shrink: 0;
   width: 100%;
   height: 155px;
   object-fit: cover;

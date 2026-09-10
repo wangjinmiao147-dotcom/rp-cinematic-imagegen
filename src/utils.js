@@ -142,6 +142,15 @@ export class RpigError extends Error {
     }
 }
 
+export function upstreamErrorMessage(body, sensitiveKeys = []) {
+    let message = body;
+    try {
+        const parsed = JSON.parse(body);
+        message = parsed?.error?.message || parsed?.message || body;
+    } catch { /* Non-JSON error bodies are also useful diagnostics. */ }
+    return scrubSensitiveText(String(message), sensitiveKeys).slice(0, 500);
+}
+
 export function safeRequestUrl(raw) {
     try { const url = new URL(raw, globalThis.location?.href || 'http://localhost'); return url.origin + url.pathname; }
     catch { return '[无效地址]'; }

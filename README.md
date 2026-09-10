@@ -2,7 +2,7 @@
 
 面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的电影级角色扮演配图扩展。它会根据当前剧情、在场人物与角色参考图，生成剧照抓拍、表情特写、三视图或全身立绘，并把结果保存在当前聊天与角色图库中。
 
-当前版本：**v2.9.22**
+当前版本：**v2.9.23**
 已验证环境：**SillyTavern 1.18.0**
 
 ## 功能
@@ -27,7 +27,7 @@
 
 前提：已经安装“酒馆助手（JS-Slash-Runner）”。
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.22.json`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.23.json`。
 2. 打开“酒馆助手” → “脚本库”，导入 JSON，并选择“全局脚本”。脚本默认启用，导入后会立即检查安装状态。
 3. 安装器会自动从本仓库安装或更新完整扩展并刷新页面；若发现旧目录 `rp-cinematic-v2`，会先装好正式版，再移除旧目录并保留现有设置。
 4. 以后需要更新时，点击脚本按钮“安装 / 更新 RP 电影配图”。
@@ -45,7 +45,7 @@
 
 ### 使用 ZIP 手动安装
 
-1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.22.zip`。
+1. 下载 Release 中的 `rp-cinematic-imagegen-v2.9.23.zip`。
 2. 解压后得到 `rp-cinematic-imagegen` 文件夹。
 3. 把该文件夹复制到：
 
@@ -130,3 +130,9 @@ npm run build
 已在 Android 16 小米浏览器 Chromium 135 的真实远程调试中验证悬浮球根元素定位问题；并非 Chrome 品牌浏览器的实测认证。参考图保存在各浏览器的 IndexedDB 中，不自动同步；在参考图设置内使用“导出当前角色参考图包”和“导入参考图包到当前角色”迁移完整图片。
 
 测试与错误码说明见 [Android 调试文档](docs/android-debugging.md)。开发测试需先运行 `npm ci`，再运行 `npm test` 与 `npm run check`。
+
+### 生图失败后重试
+
+同一消息再次点击生成，会复用上次完成的文字分析和已确认提示词，跳过文字模型及重复确认；参考图和图片接口配置会重新读取。成功生成、取消、切换聊天或修改消息/角色/分镜/画风后不复用旧分析。缓存仅在当前页面有效，刷新后清除。升级前失败的旧请求未保存分析，不能追溯恢复。
+
+Gemini 图片模型在 OpenAI 兼容后端下会读取 `/models` 的 `supported_endpoint_types`，选择服务声明的 Chat 或 Gemini 协议。服务端 404、鉴权或限流仍会明确报错，不代表插件可以修复上游渠道配置。

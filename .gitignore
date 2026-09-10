@@ -8,3 +8,5 @@ backup*/
 *.backup*/
 index.v*.js
 android-test-results.json
+
+android-gallery-results.json

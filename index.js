@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.22
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.23
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -32,8 +32,9 @@ import {
     RpigError,
     timeoutSignal,
 } from './src/utils.js';
-import { initializeFloatingUI, keepFloatingUIVisible, placeFloatingElement, viewportBounds } from './src/floating-ui.js';
+import { initializeFloatingUI, keepFloatingUIVisible, placeFloatingElement, viewportBounds, fitViewportOverlay } from './src/floating-ui.js';
 import { exportReferenceArchive, parseReferenceArchive, MAX_REFERENCE_ARCHIVE_BYTES } from './src/reference-transfer.js';
+import { createImageRetryCache, imageRetrySignature } from './src/image-retry.js';
 
 import {
     DEFAULT_SD_NEGATIVE,
@@ -393,7 +394,9 @@ function openLightbox(src, title) {
     const cap = $('<div class="rpig-lightbox-caption"></div>').text(title || '');
     overlay.append(img).append(cap);
 
+    let releaseViewport = () => {};
     const closeHandler = () => {
+        releaseViewport();
         $(document).off('keydown.rpigLightbox');
         overlay.remove();
     };
@@ -403,6 +406,7 @@ function openLightbox(src, title) {
         if (e.key === 'Escape') closeHandler();
     });
     $('body').append(overlay);
+    releaseViewport = fitViewportOverlay(overlay[0]);
 }
 
 async function openGallery(characterOrId) {
@@ -432,7 +436,7 @@ async function openGallery(characterOrId) {
     const grid = overlay.find('#rpig-gallery-grid');
 
     if (!allImages.length) {
-        grid.append($('<div class="rpig-gallery-empty">暂无图片 —— 点击消息旁的 🎬 或在面板中生成配图后，会自动呈现在此</div>'));
+        grid.append($('<div class="rpig-gallery-empty">此设备当前角色暂无图片。成功生成的图片会显示在这里；PC 的本地图库不会自动同步到手机，可在设置中导入参考图包。</div>'));
     } else {
         allImages.forEach((entry, index) => {
             const src = entry.url;
@@ -484,7 +488,9 @@ async function openGallery(characterOrId) {
         });
     }
 
+    let releaseViewport = () => {};
     const closeHandler = () => {
+        releaseViewport();
         $(document).off('keydown.rpigGallery');
         overlay.remove();
     };
@@ -495,12 +501,14 @@ async function openGallery(characterOrId) {
         if (e.key === 'Escape') closeHandler();
     });
     $('body').append(overlay);
+    releaseViewport = fitViewportOverlay(overlay[0]);
 }
 
 let rpigGenerating = false;
 let rpigActiveTask = null;
 let rpigTaskSequence = 0;
 const rpigGenerationQueue = [];
+const rpigImageRetryCache = createImageRetryCache();
 
 function setGenStatus(phase, text) {
     const fab = $('.rpig-fab');
@@ -774,12 +782,14 @@ async function executeGenerationTask(task) {
         let sceneAnchor = (generationMeta.sceneAnchor || '').trim();
         let sceneChanged = generationMeta.sceneChanged;
         let result;
+        let retrySignature;
+        let analysisSnapshot;
+        let basePrompt = '';
 
         try {
             const shotMode = explicitShotMode || s.shotMode || 'snapshot';
             const shotLabel = shotMode === 'portrait' ? '👤 微表情特写' : '🎬 剧情剧照';
             const promptFormat = resolvePromptFormat(s);
-            toastr.info(`🎬 开始构思并生成配图（${shotLabel}）…`, '', { timeOut: 3000 });
 
             const windowSize = Math.max(2, parseInt(s.autoWindow, 10) || 12);
             const dialogueHistory = buildDialogueContext(capturedChat, messageIndex, windowSize);
@@ -790,6 +800,19 @@ async function executeGenerationTask(task) {
                 character,
                 s.characterAnchors || {},
             );
+
+            retrySignature = imageRetrySignature({ sessionKey: capturedSessionKey, messageIndex,
+                message: capturedMessage, dialogueHistory, participantContext, character,
+                characterAnchor: getCharacterVisualAnchor(character, s.characterAnchors || {}),
+                previousGenerated, settings: s, shotMode, promptFormat, presetPrompt, presetAvoid, generationMeta });
+            const cached = !presetPrompt ? rpigImageRetryCache.get(capturedMessage, retrySignature) : null;
+            if (cached) {
+                ({ prompt, basePrompt, avoid, directorDraft, omniscientDraft, visibleCharacters,
+                    excludedCharacters, finalizerApplied, sceneAnchor, sceneChanged } = cached);
+                setGenStatus('working', '④/⑤ ↻ 复用上次分析，仅重试生图…');
+                toastr.info('已复用上次完成的分析和提示词，不再请求文字模型');
+            } else {
+            toastr.info(`🎬 开始构思并生成配图（${shotLabel}）…`, '', { timeOut: 3000 });
 
             // 第一部分：沿用原有导演视角，锁定最新回合和焦点角色。
             if (!directorDraft) {
@@ -933,7 +956,10 @@ async function executeGenerationTask(task) {
                 prompt = enforceOmniscientEnsemble(prompt, visibleCharacters, excludedCharacters);
             }
 
-            const basePrompt = prompt;
+            basePrompt = prompt;
+            }
+            analysisSnapshot = { ...cached, prompt, basePrompt, avoid, directorDraft, omniscientDraft,
+                visibleCharacters, excludedCharacters, finalizerApplied, sceneAnchor, sceneChanged };
             const refs = [];
             const pushUniqueRef = (ref) => {
                 if (!(ref?.url || ref?.dataUrl)) return;
@@ -975,17 +1001,18 @@ async function executeGenerationTask(task) {
                 pushUniqueRef({ ...r, kind: r.kind || 'identity-secondary' });
             }
 
-            prompt = collapsePromptToSingleParagraph(buildSceneAwareImagePrompt({
+            prompt = cached?.confirmedPrompt || collapsePromptToSingleParagraph(buildSceneAwareImagePrompt({
                 basePrompt: prompt,
                 sceneAnchor,
                 hasIdentityReference: refs.some(r => r.kind === 'identity-primary'),
                 hasContinuityReference: !!previousGenerated?.url,
                 promptFormat,
             }));
+            if (cached?.confirmedPrompt) avoid = cached.confirmedAvoid;
             const sameMessageReference = previousGenerated?.sourceType === 'same_message';
 
             throwIfAborted(signal);
-            if (s.previewBeforeGeneration !== false && generationMeta.automatic !== true) {
+            if (s.previewBeforeGeneration !== false && generationMeta.automatic !== true && !cached?.confirmedPrompt) {
                 setGenStatus('working', '④/⑤ 📝 等待确认最终提示词…');
                 const review = await reviewFinalPrompt({
                     prompt,
@@ -998,6 +1025,7 @@ async function executeGenerationTask(task) {
                     signal,
                 });
                 if (!review.confirmed) {
+                    rpigImageRetryCache.delete(capturedMessage);
                     setGenStatus('idle', '');
                     toastr.info('已取消本次生成，未请求图片后端');
                     return { cancelled: true, beforeBackend: true };
@@ -1005,6 +1033,9 @@ async function executeGenerationTask(task) {
                 prompt = review.prompt;
                 avoid = review.avoid;
             }
+
+            analysisSnapshot.confirmedPrompt = prompt;
+            analysisSnapshot.confirmedAvoid = avoid;
 
             setGenStatus('working', `④/⑤ 🖼 后端渲染中（${shotLabel}）…`);
             result = await generateImage(s, prompt, avoid, refs, {
@@ -1018,6 +1049,7 @@ async function executeGenerationTask(task) {
                     : undefined,
                 signal,
             });
+            rpigImageRetryCache.delete(capturedMessage);
 
             if (previousGenerated && result.usedRefs === false) {
                 toastr.warning('⚠️ 当前后端未实际使用上一张参考图，本次仅靠文字维持造型；建议检查 /images/edits 或图生图配置', '', { timeOut: 9000 });
@@ -1120,13 +1152,18 @@ async function executeGenerationTask(task) {
             return { success: true, url: persistedUrl };
         } catch (error) {
             if (isAbortError(error)) {
+                rpigImageRetryCache.delete(capturedMessage);
                 setGenStatus('idle', '');
                 toastr.info('已取消当前生成任务');
                 return { cancelled: true };
             }
             const safeErrMsg = scrubSensitiveText(error.message || String(error));
+            if (analysisSnapshot && !result && isSessionStillValid()) {
+                rpigImageRetryCache.save(capturedMessage, retrySignature, analysisSnapshot);
+                toastr.info('分析结果已保留：再次点击生成将只重试生图；刷新页面会清除该缓存');
+            }
             setGenStatus('error', safeErrMsg);
-            toastr.error(`❌ 生成失败：${escapeHtml(safeErrMsg)}`, '', { timeOut: 12000 });
+            toastr.error(`❌ 生成失败：${safeErrMsg}`, '', { timeOut: 12000, escapeHtml: true });
             return { error };
         }
 }
@@ -1465,7 +1502,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.22</span>
+            <span class="rpig-header-version">v2.9.23</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2206,7 +2243,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.22</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.23</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2593,7 +2630,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.22</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.23</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2655,6 +2692,7 @@ jQuery(async function () {
     });
 
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        rpigImageRetryCache.clear();
         rpigActiveTask?.controller.abort(createAbortError('会话已切换'));
         const removed = rpigGenerationQueue.splice(0);
         for (const task of removed) task.resolve({ cancelled: true, queued: true });
@@ -2683,5 +2721,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.22] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.23] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
 });

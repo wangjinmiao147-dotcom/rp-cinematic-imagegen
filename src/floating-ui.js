@@ -13,9 +13,9 @@ export function clampFloatingPoint(point, size, bounds, margin = 8) {
     };
 }
 
-export function placeFloatingElement(element, point, win = window) {
+export function placeFloatingElement(element, point, win = window, margin = 8) {
     const rect = element.getBoundingClientRect();
-    const target = clampFloatingPoint(point, rect, viewportBounds(win));
+    const target = clampFloatingPoint(point, rect, viewportBounds(win), margin);
     const set = (k, v) => element.style.setProperty(k, v, 'important');
     set('right', 'auto'); set('bottom', 'auto');
     set('left', `${target.left}px`); set('top', `${target.top}px`);
@@ -26,6 +26,20 @@ export function placeFloatingElement(element, point, win = window) {
     set('left', `${target.left + (target.left - placed.left) / (scaleX || 1)}px`);
     set('top', `${target.top + (target.top - placed.top) / (scaleY || 1)}px`);
     return target;
+}
+
+export function fitViewportOverlay(element, win = window) {
+    const update = () => {
+        const bounds = viewportBounds(win);
+        element.style.setProperty('box-sizing', 'border-box', 'important');
+        element.style.setProperty('width', `${bounds.width}px`, 'important');
+        element.style.setProperty('height', `${bounds.height}px`, 'important');
+        placeFloatingElement(element, bounds, win, 0);
+    };
+    update();
+    const bindings = [[win, 'resize'], [win, 'orientationchange'], [win.visualViewport, 'resize'], [win.visualViewport, 'scroll']];
+    for (const [target, event] of bindings) target?.addEventListener(event, update);
+    return () => { for (const [target, event] of bindings) target?.removeEventListener(event, update); };
 }
 
 export function keepFloatingUIVisible(fab, panel, win = window) {

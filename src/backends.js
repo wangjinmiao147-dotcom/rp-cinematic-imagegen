@@ -15,6 +15,7 @@ import {
     timeoutSignal,
     RpigError,
     requestFailure,
+    upstreamErrorMessage,
 } from './utils.js';
 import { DEFAULT_SD_NEGATIVE, preparePromptForBackend } from './prompts.js';
 
@@ -33,6 +34,61 @@ export const SIZE_MAP = {
     '1:1':    { openai: '1024x1024', gemini: '1:1',   sd: [1024, 1024] },
     '9:16':   { openai: '1024x1536', gemini: '9:16',  sd: [768, 1344] },
 };
+
+function isGeminiImageModel(model) { return /(?:^|\/)gemini-[\w.-]*image[\w.-]*$/i.test(model || ''); }
+
+async function declaredGeminiProtocol(settings, options) {
+    const base = normalizeBackendUrl(settings.backendUrl);
+    try {
+        const response = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${settings.backendKey || ''}` },
+            signal: combineAbortSignals(options.signal, timeoutSignal(15000)) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const models = await response.json();
+        const types = models?.data?.find(model => model.id === settings.backendModel)?.supported_endpoint_types || [];
+        if (types.includes('gemini')) return 'gemini';
+        if (types.includes('openai')) return 'chat';
+    } catch (error) {
+        if (isAbortError(error)) throw error;
+        options.onWarning?.(`无法读取模型支持的协议，继续检查 Images 接口：${scrubSensitiveText(error.message, [settings.backendKey])}`);
+    }
+    return 'images';
+}
+
+export function extractChatImage(data) {
+    const message = data?.choices?.[0]?.message;
+    const entries = [...(Array.isArray(message?.images) ? message.images : []), ...(Array.isArray(message?.content) ? message.content : [])];
+    for (const entry of entries) {
+        const url = entry?.image_url?.url || (typeof entry?.image_url === 'string' ? entry.image_url : null);
+        if (typeof url === 'string' && /^(data:image\/[\w.+-]+;base64,|https?:\/\/)/i.test(url)) return url;
+    }
+    const text = typeof message?.content === 'string' ? message.content : entries.map(p => p.text || '').join('\n');
+    const embedded = text.match(/data:image\/[\w.+-]+;base64,[A-Za-z0-9+/]+={0,2}/i)?.[0];
+    if (embedded) return embedded;
+    return text.match(/!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/i)?.[1] || null;
+}
+
+export async function generateOpenAIChatImage(settings, prompt, aspectRatio, refs, options = {}) {
+    const base = normalizeBackendUrl(settings.backendUrl);
+    const model = settings.backendModel.trim();
+    const key = (settings.backendKey || '').trim();
+    const content = [{ type: 'text', text: `${prompt}\nOutput an image, aspect ratio ${aspectRatio || '16:9'}. Reference 1 controls character identity; reference 2, if present, controls unchanged continuity only.` }];
+    for (const ref of refs || []) {
+        if (!ref?.dataUrl) throw new RpigError('REFERENCE_MISSING', 'Chat 图片请求缺少参考图数据，已停止');
+        content.push({ type: 'image_url', image_url: { url: ref.dataUrl } });
+    }
+    const url = `${base}/chat/completions`;
+    let response;
+    try {
+        response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+            body: JSON.stringify({ model, stream: false, modalities: ['text', 'image'], messages: [{ role: 'user', content }] }),
+            signal: combineAbortSignals(options.signal, timeoutSignal(300000)) });
+    } catch (error) { throw requestFailure(error, url, 'Chat 格式图片生成失败', [key]); }
+    if (!response.ok) throw new RpigError('CHAT_IMAGE_HTTP', `Chat 图片 HTTP ${response.status}: ${upstreamErrorMessage(await response.text(), [key])}`, { status: response.status });
+    const data = await response.json();
+    const image = extractChatImage(data);
+    if (!image) throw new RpigError('CHAT_IMAGE_EMPTY', 'Chat 图片接口没有返回图片；未把纯文本当作图片，也未丢弃参考图重试');
+    return { ...(image.startsWith('data:') ? { dataUrl: image } : { imageUrl: image }), model, usedRefs: Boolean(refs?.length) };
+}
 
 /**
  * 统一将持久化参考图（url）在内存中水合为 dataUrl 供后端 API 使用
@@ -106,7 +162,24 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
             break;
         case BACKENDS.OPENAI:
         default:
-            result = await generateOpenAIImage(s, prepared.prompt, size.openai, hydratedRefs, { ...options, onWarning });
+            if (isGeminiImageModel(s.backendModel)) {
+                const protocol = await declaredGeminiProtocol(s, { ...options, onWarning });
+                if (protocol === 'chat') {
+                    result = await generateOpenAIChatImage(s, prepared.prompt, size.gemini, hydratedRefs, options);
+                    break;
+                }
+                if (protocol === 'gemini') {
+                    result = await generateGeminiImage(s, prepared.prompt, size.gemini, hydratedRefs, { ...options, openAICompatibleRelay: true });
+                    break;
+                }
+            }
+            try {
+                result = await generateOpenAIImage(s, prepared.prompt, size.openai, hydratedRefs, { ...options, onWarning });
+            } catch (error) {
+                if (error.code !== 'GEMINI_IMAGE_PROTOCOL_MISMATCH') throw error;
+                onWarning('上游明确拒绝 Gemini 模型使用 Images API，正在保留原提示词和参考图，改用 Gemini generateContent 接口');
+                result = await generateGeminiImage(s, prepared.prompt, size.gemini, hydratedRefs, { ...options, openAICompatibleRelay: true });
+            }
             break;
     }
 
@@ -125,6 +198,13 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
     const model = (settings.backendModel || 'gpt-image-1').trim();
     const key = (settings.backendKey || '').trim();
     const onWarning = options.onWarning || (() => {});
+
+    const checkProtocolMismatch = (body, status) => {
+        if ((status === 400 || status === 500) && /(?:^|\/)gemini-[\w.-]*image[\w.-]*$/i.test(model)
+            && /only imagen models are supported/i.test(body) && /not supported model for image generation/i.test(body)) {
+            throw new RpigError('GEMINI_IMAGE_PROTOCOL_MISMATCH', `Gemini 图片模型被错误送入仅支持 Imagen 的 Images API：${upstreamErrorMessage(body, [key])}`, { status });
+        }
+    };
 
     const headers = {};
     if (key) {
@@ -191,9 +271,10 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
 
                 const errStatus = res.status;
                 const errBody = await res.text().catch(() => '');
+                checkProtocolMismatch(errBody, errStatus);
                 const unsupported = errStatus === 405 || errStatus === 501;
                 throw new RpigError(unsupported ? 'EDITS_UNSUPPORTED' : errStatus === 404 ? 'EDITS_NOT_FOUND' : 'EDITS_HTTP',
-                    `OpenAI Edits HTTP ${errStatus}: ${scrubSensitiveText(errBody, [key]).slice(0, 300)}。${unsupported ? '接口不接受该编辑方法。' : errStatus === 404 ? '请核对 API 根地址、路由与模型是否支持 edits；404 本身不能证明模型不支持。' : ''}已停止，未降级为文生图`, { status: errStatus });
+                    `OpenAI Edits HTTP ${errStatus}: ${upstreamErrorMessage(errBody, [key])}。${unsupported ? '接口不接受该编辑方法。' : errStatus === 404 ? '请核对 API 根地址、路由与模型是否支持 edits；404 本身不能证明模型不支持。' : ''}已停止，未降级为文生图`, { status: errStatus });
             } catch (editErr) {
                 if (isAbortError(editErr)) throw editErr;
                 throw requestFailure(editErr, `${base}/images/edits`, '参考图 edits 请求失败；未降级为文生图', [key]);
@@ -225,7 +306,8 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
 
     if (!res.ok) {
         const errText = await res.text().catch(() => '');
-        throw new Error(`图片 API HTTP ${res.status}: ${scrubSensitiveText(errText, [key]).slice(0, 300)}`);
+        checkProtocolMismatch(errText, res.status);
+        throw new Error(`图片 API HTTP ${res.status}: ${upstreamErrorMessage(errText, [key])}`);
     }
 
     const data = await res.json();
@@ -246,7 +328,10 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
  * Google Gemini 图像生成后端（符合当前官方 Generate Content REST 规范）
  */
 export async function generateGeminiImage(settings, prompt, aspectRatio, refs, options = {}) {
-    const base = normalizeBackendUrl(settings.backendUrl, 'https://generativelanguage.googleapis.com/v1');
+    let base = normalizeBackendUrl(settings.backendUrl, 'https://generativelanguage.googleapis.com/v1');
+    // New API deployments expose the native Gemini route under /v1beta even
+    // when the same server's OpenAI-compatible base is /v1.
+    if (options.openAICompatibleRelay) base = base.replace(/\/v1$/, '/v1beta');
     const model = (settings.backendModel || 'gemini-2.5-flash-image').trim();
     const key = (settings.backendKey || '').trim();
 
@@ -268,8 +353,8 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
                         text: `Reference image ${index + 1} (${ref.label || 'character reference'}): ${roleInstruction} It does not represent an additional person and must not increase or duplicate the cast.`,
                     });
                     parts.push({
-                        inline_data: {
-                            mime_type: mime,
+                        inlineData: {
+                            mimeType: mime,
                             data: base64Data,
                         },
                     });
@@ -286,18 +371,19 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
 
     const headers = { 'Content-Type': 'application/json' };
     if (key) {
-        headers['x-goog-api-key'] = key;
+        if (options.openAICompatibleRelay) headers.Authorization = `Bearer ${key}`;
+        else headers['x-goog-api-key'] = key;
     }
 
     const requestBody = {
-        contents: [{ parts: parts }],
+        contents: [{ role: 'user', parts: parts }],
         generationConfig: {
             responseModalities: ["TEXT", "IMAGE"],
-            responseFormat: {
+            ...(options.openAICompatibleRelay ? { imageConfig: { aspectRatio: aspectRatio || '16:9' } } : { responseFormat: {
                 image: {
                     aspectRatio: aspectRatio || '16:9',
                 },
-            },
+            } }),
         },
     };
 
@@ -313,12 +399,12 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
         });
     } catch (netErr) {
         if (isAbortError(netErr)) throw netErr;
-        throw new Error(`Gemini 连接失败：${scrubSensitiveText(netErr.message, [key])}`);
+        throw requestFailure(netErr, url, 'Gemini 图片连接失败', [key]);
     }
 
     if (!res.ok) {
         const errText = await res.text().catch(() => '');
-        throw new Error(`Gemini 图片 HTTP ${res.status}: ${scrubSensitiveText(errText, [key]).slice(0, 300)}`);
+        throw new RpigError('GEMINI_IMAGE_HTTP', `Gemini 图片 HTTP ${res.status}: ${upstreamErrorMessage(errText, [key])}`, { status: res.status });
     }
 
     const data = await res.json();

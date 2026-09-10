@@ -1,6 +1,6 @@
 # Android 真机修复与验证
 
-## 2026-09-10 的证据及边界
+## v2.9.22 初次验证的证据及边界
 
 设备为 Android 16，小米浏览器 20.26.1040901，Chromium 135.0.7049.79；通过 USB ADB 与浏览器真实 CDP 端点连接。不是桌面设备视口模拟，也不是独立 Google Chrome App 的实测认证。
 
@@ -10,7 +10,7 @@
 4. 当前手机剧情 LLM 配置为复用酒馆 LLM。文本请求与插件直连图片请求是不同执行路径。
 5. 手机控制台另有 `mobile` 扩展重复声明、forumUIReady 未定义，以及 tts 的 SpeechSynthesisUtterance 未定义；这些不属于本插件。不能据此宣称本插件的网络故障原因已确定。
 
-本次没有获得原生产 edits/generations 或 LLM 的失败请求，也没有宣称生产图片生成已验证成功。需要用原接口实际生成一次验证。
+初次验证时没有获得原生产 edits/generations 或 LLM 的失败请求，也没有宣称生产图片生成已验证成功。需要用原接口实际生成一次验证。
 
 ## 改动
 
@@ -46,7 +46,7 @@ npm test
 npm run check
 ```
 
-48 项测试包括真实调用函数的错误分支测试和 fake-indexeddb 事务故障测试，原 CSS 检查仅作为补充。
+v2.9.22 的 48 项测试包括真实调用函数的错误分支测试和 fake-indexeddb 事务故障测试，原 CSS 检查仅作为补充。
 
 ## 可重复的 Android CDP 测试
 
@@ -65,8 +65,22 @@ npm run check
 
 ## 安装后仍需验证
 
-- 在手机扩展管理中更新仓库版本并刷新，确认版本 v2.9.22；调试会话的临时注入不会替代安装更新。
+- 在手机扩展管理中更新仓库版本并刷新，确认版本 v2.9.23；调试会话的临时注入不会替代安装更新。
 - 横竖屏、地址栏伸缩、键盘打开/关闭、拖拽悬浮球及面板滚动。
 - 原生产 LLM、带角色参考图 edits、无参考图 generations，以及输出临时 URL 下载并保存的完整流程。
 - PC 导出参考图包，在手机同一角色导入后生成一次；不同浏览器/不同服务器不应依赖相同 IndexedDB 或绝对本地路径。
 - 如需要 Google Chrome App 与其他 WebView 的认证，分别在相应真实 App 中复验；不能把小米浏览器内核版本当作全部浏览器兼容证明。
+
+## v2.9.23：图库、重试与模型协议补充验证
+
+- 用户后续截图显示 `/images/edits` HTTP 500，正文为 `not supported model for image generation, only imagen models are supported`。这是 NewAPI Gemini 图片转换器的明确错误，不能归类为 CORS 或参考图丢失。对应源码：https://github.com/QuantumNous/new-api/blob/main/relay/channel/gemini/adaptor.go 。
+- 真机 `/v1/models` 返回 200，所选 Gemini 图片模型声明 `supported_endpoint_types: ["openai"]`。插件据此选择 Chat 图片协议并携带全部参考图；声明 Gemini 则使用原生协议。未知声明保留原 Images 路径，仅针对明确的协议不匹配错误进行一次原生尝试；普通 HTTP 错误不盲目切换。
+- 该服务的实际 Chat 生图 POST 与原生 generateContent POST 都返回 HTTP 404 / openai_error，OPTIONS 为 204。没有生产出图成功记录。仍需检查服务端渠道、模型映射和同一密钥的 PC 当前表现，不能声称前端修复已解决上游故障。
+- 用户第二张截图对应的真实图库有 3 张图，3 张均已加载，但 overlay 高度仅 40px，grid 高度仅 8px；根元素高度为 0 且有 transform/perspective。修复为实际可视视口尺寸，并阻止关闭按钮被压缩换行、网格卡片被压扁。
+- 在同一真实 Android 浏览器运行当前图库函数和样式，18 张测试图全部加载，图库可滚动、大图可打开关闭。完整 v2.9.23 页面加载后 FAB 数量为 1、设置面板存在、无插件初始化异常，图库高度 688.923px、网格 594.308px。整页刷新后酒馆未恢复原聊天，因此该次启动检查不能声称原角色 3 张图已复验成功。
+- 文字分析完成后图片或参考图失败，在当前页面保留分析和确认后的提示词。再次生成会重新读取参考图、使用最新图片配置，不重复调用文字模型。消息、聊天、角色、镜头或风格变化会使缓存失效。取消、成功或刷新清除缓存；升级前的失败无法追溯恢复。
+- 本地共 74 项行为测试，新增实际生成任务的缓存/失效/取消测试和 Gemini 原生、Chat、Images 协议及错误分支测试。错误提示解析服务端 JSON，避免重复 HTML 转义。
+
+真机图库测试命令：`npm run test:android:gallery`（先按上文建立 CDP forward，无需 fixture HTTP 服务）。使用当前图库函数与 18 张内存图片，不写用户图库；会关闭当前图库并打开测试图库，结束后关闭。报告写入 `android-gallery-results.json`。这验证真实浏览器布局与交互，不替代用户原图片和安装后的验证。
+
+仍需实机复验：正式更新后回到原角色查看 3 张图片；横竖屏和浏览器工具栏展开/收起；修复上游后带参考图成功生成、失败重试不重复分析及临时图片保存。独立 Chrome App/其他 WebView 尚未认证。
