@@ -74,3 +74,15 @@ test('cancellation and explicit chat cleanup discard retry analysis',async()=>{
 test('generation error toast supplies plain text with explicit HTML escaping',async()=>{
     const f=fixture();await f.run();const error=f.state.toasts.find(t=>t.type==='error');assert.equal(error.options.escapeHtml,true);assert.equal(error.message.includes('&quot;'),false);
 });
+
+test('user can choose fresh analysis after failure and then reuse the new result', async()=>{
+    const f=fixture();await f.run();assert.equal(f.state.textCalls,3);
+    f.settings.imageRetryMode='reanalyze';await f.run();assert.equal(f.state.textCalls,6);assert.equal(f.state.reviews,2);
+    f.settings.imageRetryMode='reuse';f.state.failImage=false;assert.equal((await f.run()).success,true);
+    assert.equal(f.state.textCalls,6);assert.equal(f.state.reviews,2);
+});
+test('fresh analysis failure cannot resurrect an older cached prompt', async()=>{
+    const f=fixture();await f.run();f.settings.imageRetryMode='reanalyze';f.state.failText=true;await f.run();
+    f.settings.imageRetryMode='reuse';f.state.failText=false;await f.run();
+    assert.equal(f.state.textCalls,7);assert.equal(f.state.reviews,2);
+});

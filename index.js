@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.23
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.24
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -114,6 +114,7 @@ const defaultSettings = {
     autoCooldown: 3,     // 至少间隔 N 条消息才再次检测
     autoWindow: 12,      // 分析最近 N 条消息
     previewBeforeGeneration: true, // 手动生成时预览并可编辑最终提示词
+    imageRetryMode: 'reuse', // 失败重试时复用分析，或由用户选择重新分析
     // LLM（剧情检测与配图提示词生成）
     llmSource: 'tavern', // tavern=复用酒馆当前LLM, custom=扩展内独立配置
     llmUrl: '',
@@ -805,7 +806,8 @@ async function executeGenerationTask(task) {
                 message: capturedMessage, dialogueHistory, participantContext, character,
                 characterAnchor: getCharacterVisualAnchor(character, s.characterAnchors || {}),
                 previousGenerated, settings: s, shotMode, promptFormat, presetPrompt, presetAvoid, generationMeta });
-            const cached = !presetPrompt ? rpigImageRetryCache.get(capturedMessage, retrySignature) : null;
+            if (s.imageRetryMode === 'reanalyze') rpigImageRetryCache.delete(capturedMessage);
+            const cached = !presetPrompt && s.imageRetryMode !== 'reanalyze' ? rpigImageRetryCache.get(capturedMessage, retrySignature) : null;
             if (cached) {
                 ({ prompt, basePrompt, avoid, directorDraft, omniscientDraft, visibleCharacters,
                     excludedCharacters, finalizerApplied, sceneAnchor, sceneChanged } = cached);
@@ -1160,7 +1162,7 @@ async function executeGenerationTask(task) {
             const safeErrMsg = scrubSensitiveText(error.message || String(error));
             if (analysisSnapshot && !result && isSessionStillValid()) {
                 rpigImageRetryCache.save(capturedMessage, retrySignature, analysisSnapshot);
-                toastr.info('分析结果已保留：再次点击生成将只重试生图；刷新页面会清除该缓存');
+                toastr.info('分析结果已保留：可在悬浮面板“失败重试方式”选择沿用提示词或重新分析；刷新页面会清除缓存');
             }
             setGenStatus('error', safeErrMsg);
             toastr.error(`❌ 生成失败：${safeErrMsg}`, '', { timeOut: 12000, escapeHtml: true });
@@ -1502,7 +1504,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.23</span>
+            <span class="rpig-header-version">v2.9.24</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -1825,6 +1827,16 @@ function buildSettingsUI() {
     });
 
     card3.body.append(row('默认镜头模式', shotModeSelect, '消息操作区 🎬 按钮悬浮或长按时可即时快速切换镜头'));
+    const retryModeSelect = $('<select class="rpig-retry-mode-select">')
+        .append($('<option value="reuse">沿用上次提示词，仅重试生图</option>'))
+        .append($('<option value="reanalyze">重新分析并生成（重 roll）</option>'))
+        .val(s.imageRetryMode === 'reanalyze' ? 'reanalyze' : 'reuse');
+    retryModeSelect.on('change', () => {
+        s.imageRetryMode = retryModeSelect.val();
+        $('.rpig-retry-mode-select').val(s.imageRetryMode);
+        saveSettingsDebounced();
+    });
+    card3.body.append(row('失败重试方式', retryModeSelect, '有失败缓存时生效。选择重新分析会丢弃旧缓存并重新请求文字模型；成功出图后再次生成仍会重新分析。'));
     card3.body.append(switchRow(
         '生成前预览最终提示词',
         previewBeforeGenerationCheck,
@@ -2243,7 +2255,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.23</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.24</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2309,6 +2321,12 @@ function buildFloatingUI() {
             </div>
         </div>
 
+        <label style="display:block;min-width:0;">失败重试方式
+            <select id="rpig-fab-retry-mode" class="rpig-retry-mode-select" style="width:100%;max-width:100%;">
+                <option value="reuse">沿用上次提示词，仅重试生图</option>
+                <option value="reanalyze">重新分析并生成（重 roll）</option>
+            </select>
+        </label>
         <div class="rpig-fab-btns">
             <button class="menu_button rpig-btn-action-primary" id="rpig-gen-now" title="以当前所选镜头立即生成当前轮配图">🪄 立即出图</button>
             <button class="menu_button" id="rpig-gallery-btn" title="查看当前角色历史图片">📚 角色图库</button>
@@ -2327,6 +2345,7 @@ function buildFloatingUI() {
         $('#rpig-fab-size-select').val(s.imageSize || '16:9');
         $('#rpig-fab-style-select').val(s.stylePreset || 'character');
         $('#rpig-fab-shot-mode').val(s.shotMode || 'snapshot');
+        $('.rpig-retry-mode-select').val(s.imageRetryMode === 'reanalyze' ? 'reanalyze' : 'reuse');
 
         // 视角模式高亮
         const isOmni = s.omniscientMode !== false;
@@ -2588,6 +2607,12 @@ function buildFloatingUI() {
     }
 
     $('#rpig-gen-now').on('click', generateLatestAssistantMessage);
+    $('#rpig-fab-retry-mode').on('change', function () {
+        const s = getSettings();
+        s.imageRetryMode = $(this).val();
+        $('.rpig-retry-mode-select').val(s.imageRetryMode);
+        saveSettingsDebounced();
+    });
 
     $('#rpig-cancel-current').on('click', cancelCurrentGeneration);
     $('#rpig-clear-queue').on('click', clearQueuedGenerations);
@@ -2630,7 +2655,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.23</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.24</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2721,5 +2746,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.23] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.24] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
 });
