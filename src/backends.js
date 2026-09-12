@@ -17,7 +17,7 @@ import {
     requestFailure,
     upstreamErrorMessage,
 } from './utils.js';
-import { DEFAULT_SD_NEGATIVE, preparePromptForBackend } from './prompts.js';
+import { DEFAULT_SD_NEGATIVE, preparePromptForBackend, referenceImageEditPrompt } from './prompts.js';
 
 export const BACKENDS = {
     OPENAI: 'openai',      // OpenAI 兼容 images API（gpt-image / 国产兼容）
@@ -71,9 +71,10 @@ export async function generateOpenAIChatImage(settings, prompt, aspectRatio, ref
     const base = normalizeBackendUrl(settings.backendUrl);
     const model = settings.backendModel.trim();
     const key = (settings.backendKey || '').trim();
-    const content = [{ type: 'text', text: `${prompt}\nOutput an image, aspect ratio ${aspectRatio || '16:9'}. Reference 1 controls character identity; reference 2, if present, controls unchanged continuity only.` }];
+    const content = [{ type: 'text', text: `${prompt}\nOutput an image, aspect ratio ${aspectRatio || '16:9'}. Reference 1 controls character identity and visual style.` }];
     for (const ref of refs || []) {
         if (!ref?.dataUrl) throw new RpigError('REFERENCE_MISSING', 'Chat 图片请求缺少参考图数据，已停止');
+        content.push({ type: 'text', text: ref.kind === 'continuity' ? 'This reference only guides unchanged clothing and props; it must not override the first image identity or style.' : 'Identity/style reference of the same character, not an additional person. The first image has priority.' });
         content.push({ type: 'image_url', image_url: { url: ref.dataUrl } });
     }
     const url = `${base}/chat/completions`;
@@ -143,8 +144,13 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
     const fetchFn = options.fetchToDataUrl || fetchToDataUrl;
 
     throwIfAborted(options.signal);
+    if (s.stylePreset === 'reference') {
+        if (!refs?.length || refs.every(ref => ref.kind === 'continuity')) throw new RpigError('REFERENCE_REQUIRED', '参考图驱动模式需要角色图片。请先导入图片；不会改为纯文生图。');
+        if (![BACKENDS.OPENAI, BACKENDS.GEMINI, BACKENDS.SD].includes(s.backend || BACKENDS.OPENAI)) throw new RpigError('REFERENCE_BACKEND_UNSUPPORTED', '参考图驱动模式请使用 OpenAI 兼容图片接口、Gemini 或 SD img2img；当前后端未验证图片编辑能力，已停止。');
+    }
     const hydratedRefs = await hydrateReferenceImages(refs, fetchFn, 5, options.signal);
     const prepared = preparePromptForBackend(s, prompt, avoid, options);
+    if (s.stylePreset === 'reference') prepared.prompt = referenceImageEditPrompt(prepared.prompt);
 
     let result;
     switch (s.backend) {
@@ -216,7 +222,8 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
     // 1. 如果有参考图，先尝试 multipart/form-data 的 /images/edits
     if (hasRefs) {
         if (refs.some(ref => !ref?.dataUrl)) throw new RpigError('REFERENCE_MISSING', '参考图尚未读取，不能继续文生图');
-        const editCandidates = refs.slice(0, 2);
+        // One request with all selected references, never separate generations.
+        const editCandidates = refs.slice(0, 1);
         const shouldUseHighFidelity = options.continuityReference === true && options.sceneChanged !== true;
 
         for (let refIndex = 0; refIndex < editCandidates.length; refIndex++) {
@@ -232,7 +239,12 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
                         : 'png';
                 const buildEditForm = (highFidelity) => {
                 const formData = new FormData();
-                formData.append('image', blob, `reference.${extension}`);
+                if (refs.length === 1) formData.append('image', blob, `reference.${extension}`);
+                else refs.forEach((ref, index) => {
+                    const image = dataUrlToBlob(ref.dataUrl);
+                    const ext = image.type === 'image/jpeg' ? 'jpg' : image.type === 'image/webp' ? 'webp' : 'png';
+                    formData.append('image[]', image, `reference-${index + 1}.${ext}`);
+                });
                 formData.append('prompt', prompt);
                 formData.append('model', model);
                 formData.append('n', '1');
@@ -339,7 +351,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
     if (Array.isArray(refs) && refs.length > 0) {
         // 多张同一角色参考图容易被 Gemini 误解成多个主体。
         // 固定前两张的职责：第一张只锁身份，第二张只提供上一镜头连续性。
-        for (const [index, ref] of refs.slice(0, 2).entries()) {
+        for (const [index, ref] of refs.entries()) {
             if (ref && ref.dataUrl) {
                 const mime = ref.dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/)?.[1] || 'image/png';
                 const base64Data = ref.dataUrl.split(',')[1];
@@ -362,7 +374,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
             }
         }
         parts.push({
-            text: 'REFERENCE PRIORITY: reference image 1 controls identity and facial likeness; reference image 2 controls only unchanged continuity details. If they conflict, reference image 1 always wins for the face. Multiple references may depict the same character and never add people. Generate only the exact visible cast and headcount in the main prompt, with each listed character appearing once.',
+            text: 'REFERENCE PRIORITY: reference image 1 controls identity, facial likeness and visual style. Other references follow their labeled roles and cannot override its style or face. Multiple references may depict the same character and never add people. Generate only the exact visible cast and headcount in the main prompt, with each listed character appearing once.',
         });
     }
     parts.push({

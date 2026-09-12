@@ -8,10 +8,21 @@ export const DEFAULT_SD_NEGATIVE = 'poorly drawn hands, malformed hands, deforme
 
 // 画风预设指令
 export const STYLE_PRESETS = {
+    reference: '参考图驱动：文字只描述剧情变化，身份与画风由实际输入图片决定。',
     character: `【画风原则】严格跟随角色原图与人设的真实画风。二次元动漫角色卡采用 anime style / 2D illustration / cel shading；写实真人卡采用 photorealistic / cinematic lighting。风格必须前后统一。`,
     anime: `【画风原则】强制二次元动画风格。final_prompt 必须指明：2D anime illustration, cel shading, clean lineart, vibrant colors。严禁出现 photorealistic、real photo 等写实词。`,
     realistic: `【画风原则】电影写实风格。final_prompt 使用 photorealistic, cinematic lighting, 35mm film, shallow depth of field, natural skin texture 等写实质感词；严禁出现 anime、cel shading 等二次元词。`,
 };
+
+export const REFERENCE_STORY_RULES = `你是图生图的剧情编辑助手。图片模型会收到用户的实际参考图片；你没有看到这些图片，不得猜测它们的画风或人物外貌。
+只总结最新剧情中需要改变的地点、时间、天气、动作、表情、视线、人物空间关系、必要道具和构图。仅在剧情明确要求时描述服装变化；其余外貌和服装沿用参考图。
+不要添加或推断发色、瞳色、脸型、年龄、肤色、艺术媒介、画风标签、画质标签、摄影器材或写实质感。不要把旧初稿中的这些描述带入新稿。
+场景光源可以随剧情改变，但画风、线条、笔触、材质表现和色彩处理必须由第一张参考图决定。参考图不是额外人物；只呈现有在场证据的角色，不添加背景人群或分身。
+最终英文指令应当像“让参考图中的人物在指定场景做指定动作”，不能另写一份人物设计或文生图画风描述。`;
+
+export function referenceImageEditPrompt(prompt) {
+    return `Edit the supplied reference image to depict the following story moment. Reference image 1 is authoritative for character identity AND visual style: preserve its facial design, proportions, linework, brushwork, rendering medium, texture treatment and color treatment. Do not restyle or redesign the character. Keep clothing and accessories unless the story explicitly changes them. Change only the scene, action, expression, gaze, spatial relationships and framing described below. A new light source must not change the rendering style. Other identity references are supporting views of the same character; continuity references only guide unchanged clothing and props, never override the first image's style or face. Story instructions: ${prompt}`;
+}
 
 // 双镜头模式指令
 export const SHOT_MODE_INSTRUCTIONS = {
@@ -150,7 +161,9 @@ export function buildDirectorPrompt({
     const formatInst = FORMAT_INSTRUCTIONS[promptFormat] || FORMAT_INSTRUCTIONS.natural;
     const styleInst = STYLE_PRESETS[stylePreset] || STYLE_PRESETS.character;
 
-    const system = DIRECTOR_SYSTEM_PROMPT
+    const system = stylePreset === 'reference'
+        ? `${REFERENCE_STORY_RULES}\n镜头任务：${shotMode === 'portrait' ? '重点描述表情、视线及必要手势' : '重点描述场景动作和人物互动'}。只返回 JSON：{"scene_changed":true,"reason":"剧情变化理由","style":"reference","shot":"构图","scene_anchor":"英文场景事实","final_prompt":"英文剧情编辑指令","avoid":"不要出现的剧情元素"}。不得虚构场景事实。`
+        : DIRECTOR_SYSTEM_PROMPT
         .replace('${shotInstruction}', shotInst)
         .replace('${formatInstruction}', formatInst)
         .replace('${stylePreset}', styleInst);
@@ -212,7 +225,7 @@ export function buildOmniscientPrompt({
     if (sceneAnchor) userText += `\n\n【已提取场景锚点】：${stripHtml(sceneAnchor).slice(0, 700)}`;
     userText += `\n\n【镜头模式】：${shotMode}\n【画风设置】：${stylePreset}`;
     userText += '\n【演员表硬约束】：先判断身体在场证据，再合并别名。不要预设用户、当前回复角色或所有群成员都在场；“属于群聊”“近期说过话”“角色卡存在”都不是入镜证据。证据不足一律放入 excluded_characters。若当前场景只有一人，就必须返回恰好一人的 visible_characters 和 single-character shot。最终画面人数必须与 visible_characters 完全相等。';
-    return { system: OMNISCIENT_SYSTEM_PROMPT, userText };
+    return { system: stylePreset === 'reference' ? `${REFERENCE_STORY_RULES}\n根据最新剧情判断实际在场人物，合并别名，排除仅被提及或未登场人物。只返回 JSON，包含 visible_characters（在场角色名称数组）、excluded_characters（排除名称数组）和 ensemble_prompt（英文动作、表情、空间关系描述）。` : OMNISCIENT_SYSTEM_PROMPT, userText };
 }
 
 export const FINALIZER_SYSTEM_PROMPT = `你是最终生图提示词总编。你会收到焦点镜头初稿、上帝视角人物关系稿、最新剧情、人物资料、场景锚点和连续性约束。请消除冲突、去重并合成为一条可直接发送给生图模型的最终英文提示词。
@@ -263,7 +276,7 @@ export function buildFinalizerPrompt({
         userText += `\n【人数硬约束】：使用 ${shotRule}；只能出现上述 ${visibleCharacters.length} 人，必须全部入镜且每人只出现一次。不得增加名单外人物、路人、群众、倒影人物、画像人物或角色分身。`;
     }
     userText += '\n【手脚解剖】：允许手脚自然出镜和互动；每只可见手恰好五指，每只可见脚恰好五趾，手腕脚踝自然连接，手、脚、手臂和腿的数量正常。';
-    return { system: FINALIZER_SYSTEM_PROMPT, userText };
+    return { system: stylePreset === 'reference' ? `${REFERENCE_STORY_RULES}\n整合输入为一段 60–160 个英文单词的剧情编辑指令。严格遵守最终可见演员表和排除名单，每人只出现一次；只描绘单一时刻。删除初稿中推测的外貌、画风、画质或相机参数，只保留剧情事实。只输出英文段落，不输出 JSON。` : FINALIZER_SYSTEM_PROMPT, userText };
 }
 
 export function collapsePromptToSingleParagraph(value) {

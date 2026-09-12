@@ -23,10 +23,10 @@ function fixture() {
         callLLM:async system=>{state.textCalls++;if(state.failText)throw new Error('text endpoint failed');return system==='director'?JSON.stringify({final_prompt:'director draft',scene_anchor:'desk'}):system==='omniscient'?JSON.stringify({ensemble_prompt:'ensemble draft',visible_characters:['Test']}):'Final analyzed prompt';},
         parseDirectorLlmOutput:raw=>({json:JSON.parse(raw),finalPrompt:JSON.parse(raw).final_prompt}),normalizeCastCharacters:()=>['Test'],getFinalizerLlmSettings:s=>s,
         normalizeFinalPromptOutput:raw=>raw,collapsePromptToSingleParagraph:p=>p,enforceOmniscientEnsemble:p=>p,
-        getCharacterAvatarDataUrl:async()=>null,getCharacterRefs:async()=>{state.refReads++;if(state.failRefs)throw new Error('reference read failed');return[];},
+        getCharacterAvatarDataUrl:async()=>{state.avatarReads=(state.avatarReads||0)+1;return null;},getCharacterRefs:async()=>{state.refReads++;if(state.failRefs)throw new Error('reference read failed');return state.refs||[];},
         buildSceneAwareImagePrompt:({basePrompt})=>basePrompt+' + reference instructions',
         reviewFinalPrompt:async()=>{state.reviews++;return{confirmed:true,prompt:'User edited final prompt',avoid:'User edited negative'};},
-        generateImage:async(s,p,a)=>{state.imageCalls.push({settings:{...s},prompt:p,avoid:a});if(state.cancelImage)throw utils.createAbortError();if(state.failImage)throw new Error('image backend failed');return{dataUrl:'data:image/png;base64,YWJj',model:'image',usedRefs:true};},
+        generateImage:async(s,p,a,refs)=>{state.imageCalls.push({settings:{...s},prompt:p,avoid:a,refs});if(state.cancelImage)throw utils.createAbortError();if(state.failImage)throw new Error('image backend failed');return{dataUrl:'data:image/png;base64,YWJj',model:'image',usedRefs:true};},
         fetchToDataUrl:async()=>'',SlashCommandParser:{},persistMediaUrl:async()=>'/saved.png',saveBase64AsFile:()=>{},migrateLegacyMedia:()=>{},
         $:()=>({addClass(){return this;}}),updateMessageBlock:()=>{},ensureFallbackMediaRender:()=>{},saveToGallery:async()=>{},
     };
@@ -85,4 +85,12 @@ test('fresh analysis failure cannot resurrect an older cached prompt', async()=>
     const f=fixture();await f.run();f.settings.imageRetryMode='reanalyze';f.state.failText=true;await f.run();
     f.settings.imageRetryMode='reuse';f.state.failText=false;await f.run();
     assert.equal(f.state.textCalls,7);assert.equal(f.state.reviews,2);
+});
+
+test('reference style prioritizes uploaded image over card avatar in the actual task',async()=>{
+    const f=fixture();f.settings.stylePreset='reference';f.settings.useCharacterImage=true;
+    f.state.refs=[{dataUrl:'data:image/png;base64,YWJj',label:'uploaded style'}];await f.run();
+    assert.equal(f.state.avatarReads||0,0);assert.equal(f.state.imageCalls[0].refs.length,1);
+    assert.equal(f.state.imageCalls[0].refs[0].dataUrl,f.state.refs[0].dataUrl);
+    assert.equal(f.state.imageCalls[0].refs[0].kind,'identity-primary');
 });

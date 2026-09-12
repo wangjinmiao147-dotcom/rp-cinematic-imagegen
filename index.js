@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.26
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.27
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -98,7 +98,7 @@ const defaultSettings = {
     backendKey: '',
     backendModel: '',
     imageSize: '16:9',
-    stylePreset: 'character',
+    stylePreset: 'reference',
     shotMode: 'snapshot',       // snapshot=🎬 剧情剧照抓拍 portrait=👤 角色微表情特写
     omniscientMode: true,       // 焦点镜头后增加全人物上帝视角分析
     promptFormat: 'auto',       // auto=智能自动 natural=英文自然语言 tags=Danbooru标签流
@@ -149,6 +149,11 @@ function loadSettings() {
         extension_settings[extensionName] = currentSettings || {};
     }
     const s = extension_settings[extensionName];
+    if (!s.referenceStyleV1) {
+        s.stylePreset = 'reference';
+        s.referenceStyleV1 = true;
+        saveSettingsDebounced();
+    }
     for (const key of Object.keys(defaultSettings)) {
         if (s[key] === undefined) {
             s[key] = defaultSettings[key];
@@ -790,7 +795,7 @@ async function executeGenerationTask(task) {
         try {
             const shotMode = explicitShotMode || s.shotMode || 'snapshot';
             const shotLabel = shotMode === 'portrait' ? '👤 微表情特写' : '🎬 剧情剧照';
-            const promptFormat = resolvePromptFormat(s);
+            const promptFormat = s.stylePreset === 'reference' ? 'natural' : resolvePromptFormat(s);
 
             const windowSize = Math.max(2, parseInt(s.autoWindow, 10) || 12);
             const dialogueHistory = buildDialogueContext(capturedChat, messageIndex, windowSize);
@@ -972,10 +977,10 @@ async function executeGenerationTask(task) {
             };
 
             let avatarData = '';
-            if (s.useCharacterImage !== false && character) {
+            const charRefs = character ? await getCharacterRefs(character) : [];
+            if (s.useCharacterImage !== false && character && !(s.stylePreset === 'reference' && charRefs.length)) {
                 avatarData = await getCharacterAvatarDataUrl(character) || '';
             }
-            const charRefs = character ? await getCharacterRefs(character) : [];
             if (avatarData) {
                 pushUniqueRef({
                     dataUrl: avatarData,
@@ -986,7 +991,7 @@ async function executeGenerationTask(task) {
                 const firstSavedRef = charRefs[0];
                 pushUniqueRef({
                     ...firstSavedRef,
-                    label: `${firstSavedRef.label || '角色参考图'} · 第一优先级身份锚点`,
+                    label: `${firstSavedRef.label || '角色参考图'} · 第一优先级身份与画风锚点`,
                     kind: 'identity-primary',
                 });
             }
@@ -1504,7 +1509,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.26</span>
+            <span class="rpig-header-version">v2.9.27</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -1600,6 +1605,7 @@ function buildSettingsUI() {
         .val(s.promptFormat || 'auto');
 
     const styleSelect = $('<select>')
+        .append($('<option value="reference">参考图驱动（沿用上传图画风，仅编辑剧情，推荐）</option>'))
         .append($('<option value="character">跟随角色卡画风（二次元/写实自适应，推荐）</option>'))
         .append($('<option value="anime">强制二次元动画风</option>'))
         .append($('<option value="realistic">电影写实风格</option>'))
@@ -2199,7 +2205,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.26</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.27</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2228,6 +2234,7 @@ function buildFloatingUI() {
             <div class="rpig-fab-select-wrap">
                 <span class="rpig-fab-select-label">画风:</span>
                 <select id="rpig-fab-style-select" title="配图画风偏好">
+                    <option value="reference">参考图驱动</option>
                     <option value="character">跟随角色卡</option>
                     <option value="anime">二次元动画</option>
                     <option value="realistic">电影写实</option>
@@ -2306,6 +2313,7 @@ function buildFloatingUI() {
         const shotText = curMode === 'portrait' ? '微表情特写' : '剧情剧照';
         const omniText = isOmni ? '👁️ 上帝视角' : '🎬 焦点视角';
         const styleMap = {
+            reference: '参考图驱动',
             character: '自适应',
             anime: '二次元',
             realistic: '电影写实'
@@ -2599,7 +2607,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.26</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.27</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2690,5 +2698,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.26] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.27] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
 });
