@@ -106,7 +106,6 @@ export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, max
     for (const ref of refs) {
         throwIfAborted(signal);
         if (!ref) throw new RpigError('REFERENCE_MISSING', '参考图记录为空，请重新上传或导入参考图');
-        if (hydrated.length >= maxRefs) break;
 
         let dataUrl = ref.dataUrl;
         if (!dataUrl && ref.url) {
@@ -124,6 +123,7 @@ export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, max
             throw new RpigError('REFERENCE_MISSING', '参考图没有有效的图片数据或地址，请在此设备重新上传或导入；已停止生图');
         }
         if (!seen.has(dataUrl)) {
+            if (hydrated.length >= maxRefs) throw new RpigError('REFERENCE_LIMIT', `参考图超过当前允许的 ${maxRefs} 张，已停止；未截断参考图。`);
             seen.add(dataUrl);
             hydrated.push({
                 ...ref,
@@ -148,7 +148,10 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
         if (!refs?.length || refs.every(ref => ref.kind === 'continuity')) throw new RpigError('REFERENCE_REQUIRED', '参考图驱动模式需要角色图片。请先导入图片；不会改为纯文生图。');
         if (![BACKENDS.OPENAI, BACKENDS.GEMINI, BACKENDS.SD].includes(s.backend || BACKENDS.OPENAI)) throw new RpigError('REFERENCE_BACKEND_UNSUPPORTED', '参考图驱动模式请使用 OpenAI 兼容图片接口、Gemini 或 SD img2img；当前后端未验证图片编辑能力，已停止。');
     }
-    const hydratedRefs = await hydrateReferenceImages(refs, fetchFn, 5, options.signal);
+    const hydratedRefs = await hydrateReferenceImages(refs, fetchFn, refs?.length || 0, options.signal);
+    if (hydratedRefs.length > 1 && [BACKENDS.SD, BACKENDS.COMFYUI, BACKENDS.TAVERN_SD].includes(s.backend)) {
+        throw new RpigError('MULTI_REFERENCE_UNSUPPORTED', '当前后端尚未实现同时使用多张参考图，已停止，未只取第一张。请使用支持多图的 OpenAI 兼容图片接口或 Gemini，或自行保留一张参考图。');
+    }
     const prepared = preparePromptForBackend(s, prompt, avoid, options);
     if (s.stylePreset === 'reference') prepared.prompt = referenceImageEditPrompt(prepared.prompt);
 
