@@ -12,7 +12,7 @@ function fixture() {
     const message={mes:'The character sits at a desk.',send_date:'today',swipe_id:0};
     const character={name:'Test',avatar:'test.png',description:'A test character'};
     const settings={backend:'openai',backendUrl:'https://api.test/v1',backendModel:'image',shotMode:'snapshot',useCharacterImage:false,previewBeforeGeneration:true};
-    const context={chat:[message],chatId:'chat-one',saveChat:async()=>{}};
+    const context={chat:[message],chatId:'chat-one',name1:'Player',saveChat:async()=>{}};
     const cache=createImageRetryCache();
     const state={textCalls:0,imageCalls:[],reviews:0,refReads:0,failImage:true,failText:false,failRefs:false,cancelImage:false,toasts:[]};
     const dependencies={...utils,rpigImageRetryCache:cache,imageRetrySignature,getContext:()=>context,getChatSessionKey:c=>c.chatId,getSettings:()=>settings,
@@ -21,9 +21,10 @@ function fixture() {
         buildDialogueContext:chat=>chat.map(m=>m.mes).join('\n'),buildParticipantContext:()=> 'participants',getCharacterVisualAnchor:()=>character.description,
         buildDirectorPrompt:()=>({system:'director',userText:'test'}),buildOmniscientPrompt:()=>({system:'omniscient',userText:'test'}),buildFinalizerPrompt:()=>({system:'finalizer',userText:'test'}),
         callLLM:async system=>{state.textCalls++;if(state.failText)throw new Error('text endpoint failed');return system==='director'?JSON.stringify({final_prompt:'director draft',scene_anchor:'desk'}):system==='omniscient'?JSON.stringify({ensemble_prompt:'ensemble draft',visible_characters:['Test']}):'Final analyzed prompt';},
-        parseDirectorLlmOutput:raw=>({json:JSON.parse(raw),finalPrompt:JSON.parse(raw).final_prompt}),normalizeCastCharacters:()=>['Test'],getFinalizerLlmSettings:s=>s,
+        parseDirectorLlmOutput:raw=>({json:JSON.parse(raw),finalPrompt:JSON.parse(raw).final_prompt}),normalizeCastCharacters:()=>state.visibleCharacters||['Test'],getFinalizerLlmSettings:s=>s,
         normalizeFinalPromptOutput:raw=>raw,collapsePromptToSingleParagraph:p=>p,enforceOmniscientEnsemble:p=>p,
-        getCharacterAvatarDataUrl:async()=>{state.avatarReads=(state.avatarReads||0)+1;return null;},getCharacterRefs:async()=>{state.refReads++;if(state.failRefs)throw new Error('reference read failed');return state.refs||[];},
+        getCharacterAvatarDataUrl:async()=>{state.avatarReads=(state.avatarReads||0)+1;return null;},getCharacterIdentifier:c=>c?.avatar||c?.name||String(c),
+        getCharacterRefs:async target=>{state.refReads++;if(state.failRefs)throw new Error('reference read failed');return target==='user'?(state.userRefs||[]):(state.refs||[]);},
         buildSceneAwareImagePrompt:({basePrompt})=>basePrompt+' + reference instructions',
         reviewFinalPrompt:async()=>{state.reviews++;return{confirmed:true,prompt:'User edited final prompt',avoid:'User edited negative'};},
         generateImage:async(s,p,a,refs)=>{state.imageCalls.push({settings:{...s},prompt:p,avoid:a,refs});if(state.cancelImage)throw utils.createAbortError();if(state.failImage)throw new Error('image backend failed');return{dataUrl:'data:image/png;base64,YWJj',model:'image',usedRefs:true};},
@@ -92,5 +93,18 @@ test('reference style prioritizes uploaded image over card avatar in the actual 
     f.state.refs=[{dataUrl:'data:image/png;base64,YWJj',label:'uploaded style'}];await f.run();
     assert.equal(f.state.avatarReads||0,0);assert.equal(f.state.imageCalls[0].refs.length,1);
     assert.equal(f.state.imageCalls[0].refs[0].dataUrl,f.state.refs[0].dataUrl);
+    assert.equal(f.state.imageCalls[0].refs[0].kind,'identity-primary');
+});
+
+test('visible User receives the separate User three-view references without leaking the off-camera role character',async()=>{
+    const f=fixture();f.settings.stylePreset='reference';f.settings.useCharacterImage=true;f.state.visibleCharacters=['Player'];
+    f.state.refs=[{dataUrl:'data:image/png;base64,Y2hhcg==',label:'off-camera character'}];
+    f.state.userRefs=[{dataUrl:'data:image/png;base64,dXNlcg==',label:'User front'}];f.state.failImage=false;
+    assert.equal((await f.run()).success,true);
+    assert.equal(f.state.avatarReads||0,0);
+    assert.equal(f.state.imageCalls[0].refs.length,1);
+    assert.equal(f.state.imageCalls[0].refs[0].dataUrl,f.state.userRefs[0].dataUrl);
+    assert.equal(f.state.imageCalls[0].refs[0].identityId,'user');
+    assert.equal(f.state.imageCalls[0].refs[0].identityName,'Player');
     assert.equal(f.state.imageCalls[0].refs[0].kind,'identity-primary');
 });

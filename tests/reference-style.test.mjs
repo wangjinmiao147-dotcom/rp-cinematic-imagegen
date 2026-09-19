@@ -20,7 +20,18 @@ test('reference mode sends uploaded images together to edits and locks visual st
  const result=await generateImage(settings,'Have the character sit by the window.','',refs);
  assert.equal(calls.length,1);assert.ok(calls[0].url.endsWith('/images/edits'));
  const form=calls[0].options.body;assert.equal(form.getAll('image[]').length,2);
- assert.match(form.get('prompt'),/identity AND visual style/);assert.match(form.get('prompt'),/sit by the window/);assert.equal(result.usedRefs,true);
+ assert.match(form.get('prompt'),/authoritative for visual style/);assert.match(form.get('prompt'),/sit by the window/);assert.equal(result.usedRefs,true);
+});
+test('reference mode labels User and role character images as separate identities',async t=>{
+ const calls=[];t.mock.method(globalThis,'fetch',async(url,options)=>{calls.push({url,options});return new Response(JSON.stringify({data:[{b64_json:'YWJj'}]}),{status:200});});
+ const namedRefs=[
+  {...refs[0],identityId:'character:test',identityName:'Role'},
+  {...refs[1],identityId:'user',identityName:'Player'},
+ ];
+ await generateImage(settings,'Role and Player talk.','',namedRefs);
+ const prompt=calls[0].options.body.get('prompt');
+ assert.match(prompt,/image 1 = Role/);assert.match(prompt,/image 2 = Player/);
+ assert.match(prompt,/different identity names depict different cast members/);
 });
 test('reference mode never falls back after edits fails',async t=>{
  const calls=[];t.mock.method(globalThis,'fetch',async url=>{calls.push(url);return new Response('edits unsupported',{status:405})});

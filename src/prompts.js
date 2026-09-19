@@ -20,8 +20,18 @@ export const REFERENCE_STORY_RULES = `你是图生图的剧情编辑助手。图
 场景光源可以随剧情改变，但画风、线条、笔触、材质表现和色彩处理必须由第一张参考图决定。参考图不是额外人物；只呈现有在场证据的角色，不添加背景人群或分身。
 最终英文指令应当像“让参考图中的人物在指定场景做指定动作”，不能另写一份人物设计或文生图画风描述。`;
 
-export function referenceImageEditPrompt(prompt) {
-    return `Edit the supplied reference image to depict the following story moment. Reference image 1 is authoritative for character identity AND visual style: preserve its facial design, proportions, linework, brushwork, rendering medium, texture treatment and color treatment. Do not restyle or redesign the character. Keep clothing and accessories unless the story explicitly changes them. Change only the scene, action, expression, gaze, spatial relationships and framing described below. A new light source must not change the rendering style. Other identity references are supporting views of the same character; continuity references only guide unchanged clothing and props, never override the first image's style or face. Story instructions: ${prompt}`;
+export function referenceImageEditPrompt(prompt, refs = []) {
+    const identities = (Array.isArray(refs) ? refs : [])
+        .map((ref, index) => ({ ref, index }))
+        .filter(({ ref }) => ref?.kind !== 'continuity' && ref?.identityName);
+    const identityNames = [...new Set(identities.map(({ ref }) => String(ref.identityName).trim()).filter(Boolean))];
+    const referenceMap = identities.length
+        ? ` Reference identity map: ${identities.map(({ ref, index }) => `image ${index + 1} = ${ref.identityName}`).join('; ')}.`
+        : '';
+    const identityRule = identityNames.length > 1
+        ? ' References with different identity names depict different cast members; preserve each named person separately, never merge, average, duplicate, or swap their faces. Multiple views with the same identity name depict that same person.'
+        : ' Other identity references are supporting views of the same character.';
+    return `Edit the supplied reference image to depict the following story moment. Reference image 1 is authoritative for visual style and for its named character identity: preserve its facial design, proportions, linework, brushwork, rendering medium, texture treatment and color treatment. Do not restyle or redesign any referenced person. Keep clothing and accessories unless the story explicitly changes them. Change only the scene, action, expression, gaze, spatial relationships and framing described below. A new light source must not change the rendering style.${referenceMap}${identityRule} Continuity references only guide unchanged clothing and props, never override an identity reference's face. Story instructions: ${prompt}`;
 }
 
 // 双镜头模式指令

@@ -18,6 +18,14 @@ test('successful reference write and read; browser database isolation is explici
     assert.deepEqual(await getCharacterRefs('avatar.png'),[]);
 });
 
+test('User reference images use an isolated storage key', async t => {
+    setup(t);
+    const userRefs=[{dataUrl:'data:image/png;base64,dXNlcg==',label:'User front'}];
+    await saveCharacterRefs('user',userRefs);
+    assert.deepEqual(await getCharacterRefs('user'),userRefs);
+    assert.deepEqual(await getCharacterRefs('avatar.png'),[]);
+});
+
 test('IndexedDB unavailable and SecurityError reject instead of returning empty refs', async t => {
     setup(t);globalThis.indexedDB=undefined;
     await assert.rejects(getCharacterRefs('avatar.png'),{code:'REFERENCE_STORAGE_READ_FAILED'});

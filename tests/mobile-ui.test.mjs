@@ -31,3 +31,13 @@ test('mobile prompt review keeps confirmation visible without forcing the keyboa
   assert.match(css, /\.rpig-review-confirm[\s\S]*order: -1;[\s\S]*flex-basis: 100%/);
   assert.match(css, /height: 100dvh/);
 });
+
+test('settings exposes a dedicated User three-view upload backed by the isolated User reference store', async () => {
+  const source = await readFile(new URL('index.js', root), 'utf8');
+
+  assert.match(source, /id="rpig-user-three-view-upload"/);
+  assert.match(source, /上传 User 三视图/);
+  assert.match(source, /getCharacterRefs\('user'\)/);
+  assert.match(source, /saveCharacterRefs\('user',/);
+  assert.match(source, /仅当剧情分析确认 User 实际入镜时/);
+});

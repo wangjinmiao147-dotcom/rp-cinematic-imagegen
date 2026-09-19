@@ -71,10 +71,14 @@ export async function generateOpenAIChatImage(settings, prompt, aspectRatio, ref
     const base = normalizeBackendUrl(settings.backendUrl);
     const model = settings.backendModel.trim();
     const key = (settings.backendKey || '').trim();
-    const content = [{ type: 'text', text: `${prompt}\nOutput an image, aspect ratio ${aspectRatio || '16:9'}. Reference 1 controls character identity and visual style.` }];
+    const identityNames = [...new Set((refs || []).filter(ref => ref?.kind !== 'continuity' && ref?.identityName).map(ref => String(ref.identityName).trim()).filter(Boolean))];
+    const content = [{ type: 'text', text: `${prompt}\nOutput an image, aspect ratio ${aspectRatio || '16:9'}. Reference 1 controls visual style and its named character identity.${identityNames.length > 1 ? ' Different identity names are different cast members; keep every named face separate and never merge or swap them.' : ''}` }];
     for (const ref of refs || []) {
         if (!ref?.dataUrl) throw new RpigError('REFERENCE_MISSING', 'Chat 图片请求缺少参考图数据，已停止');
-        content.push({ type: 'text', text: ref.kind === 'continuity' ? 'This reference only guides unchanged clothing and props; it must not override the first image identity or style.' : 'Identity/style reference of the same character, not an additional person. The first image has priority.' });
+        const subject = ref.identityName ? ` for ${ref.identityName}` : '';
+        content.push({ type: 'text', text: ref.kind === 'continuity'
+            ? 'This reference only guides unchanged clothing and props; it must not override an identity reference or the first image style.'
+            : `Identity reference${subject}. Multiple references with this same identity name show the same person; a different identity name means a different cast member. Preserve this face and do not create an extra copy.` });
         content.push({ type: 'image_url', image_url: { url: ref.dataUrl } });
     }
     const url = `${base}/chat/completions`;
@@ -153,7 +157,7 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
         throw new RpigError('MULTI_REFERENCE_UNSUPPORTED', '当前后端尚未实现同时使用多张参考图，已停止，未只取第一张。请使用支持多图的 OpenAI 兼容图片接口或 Gemini，或自行保留一张参考图。');
     }
     const prepared = preparePromptForBackend(s, prompt, avoid, options);
-    if (s.stylePreset === 'reference') prepared.prompt = referenceImageEditPrompt(prepared.prompt);
+    if (s.stylePreset === 'reference') prepared.prompt = referenceImageEditPrompt(prepared.prompt, hydratedRefs);
 
     let result;
     switch (s.backend) {
@@ -351,6 +355,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
     const key = (settings.backendKey || '').trim();
 
     const parts = [];
+    const identityNames = [...new Set((refs || []).filter(ref => ref?.kind !== 'continuity' && ref?.identityName).map(ref => String(ref.identityName).trim()).filter(Boolean))];
     if (Array.isArray(refs) && refs.length > 0) {
         // 多张同一角色参考图容易被 Gemini 误解成多个主体。
         // 固定前两张的职责：第一张只锁身份，第二张只提供上一镜头连续性。
@@ -359,13 +364,14 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
                 const mime = ref.dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/)?.[1] || 'image/png';
                 const base64Data = ref.dataUrl.split(',')[1];
                 if (base64Data) {
+                    const subject = ref.identityName ? ` for ${ref.identityName}` : '';
                     const roleInstruction = ref.kind === 'identity-primary'
-                        ? 'This is the immutable PRIMARY IDENTITY reference. Reproduce the exact same person and face: preserve face silhouette, facial proportions, eye shape and spacing, iris color, nose, mouth, age, skin tone, hairline, hairstyle, and signature ornaments. Do not redesign, beautify, merge, average, or reinterpret this identity.'
+                        ? `This is the immutable PRIMARY IDENTITY reference${subject}. Reproduce the exact same person and face: preserve face silhouette, facial proportions, eye shape and spacing, iris color, nose, mouth, age, skin tone, hairline, hairstyle, and signature ornaments. Do not redesign, beautify, merge, average, or reinterpret this identity.`
                         : ref.kind === 'continuity'
                             ? 'This is a CONTINUITY reference only. Use it for unchanged clothing, accessories, hairstyle state, and carried props. The primary identity reference overrides this image for every facial feature; ignore any facial drift already present here. Do not copy its pose, framing, background, or lighting.'
-                            : 'This is a secondary visual reference. Use it only to clarify the same character and never average it with or override the primary identity reference.';
+                            : `This is an identity reference${subject}. Other references with the same identity name show this same person. References with a different identity name show a different cast member. Preserve this person's face and never merge, average, duplicate, or swap identities.`;
                     parts.push({
-                        text: `Reference image ${index + 1} (${ref.label || 'character reference'}): ${roleInstruction} It does not represent an additional person and must not increase or duplicate the cast.`,
+                        text: `Reference image ${index + 1} (${ref.label || 'character reference'}): ${roleInstruction} It must not increase or duplicate the cast beyond the named people in the main instruction.`,
                     });
                     parts.push({
                         inlineData: {
@@ -377,7 +383,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
             }
         }
         parts.push({
-            text: 'REFERENCE PRIORITY: reference image 1 controls identity, facial likeness and visual style. Other references follow their labeled roles and cannot override its style or face. Multiple references may depict the same character and never add people. Generate only the exact visible cast and headcount in the main prompt, with each listed character appearing once.',
+            text: `REFERENCE PRIORITY: reference image 1 controls visual style and its named character identity. Other references follow their labeled roles and cannot override its style.${identityNames.length > 1 ? ' Different identity names are different cast members; keep each named face separate and apply the matching reference only to that person.' : ' Multiple references may depict the same character and never add people.'} Generate only the exact visible cast and headcount in the main prompt, with each listed character appearing once.`,
         });
     }
     parts.push({

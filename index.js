@@ -1,5 +1,5 @@
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.28
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.29
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -976,9 +976,15 @@ async function executeGenerationTask(task) {
                 refs.push(ref);
             };
 
+            const userName = String(context?.name1 || [...capturedChat].reverse().find(message => message?.is_user)?.name || 'User protagonist').trim();
+            const normalizedVisibleNames = new Set((visibleCharacters || []).map(name => String(name || '').trim().toLowerCase()).filter(Boolean));
+            const userIsVisible = normalizedVisibleNames.has(userName.toLowerCase());
+            const characterName = String(character?.name || '').trim();
+            const characterIsVisible = !normalizedVisibleNames.size || (characterName && normalizedVisibleNames.has(characterName.toLowerCase()));
             let avatarData = '';
-            const charRefs = character ? await getCharacterRefs(character) : [];
-            if (s.useCharacterImage !== false && character && !(s.stylePreset === 'reference' && charRefs.length)) {
+            const charRefs = character && characterIsVisible ? await getCharacterRefs(character) : [];
+            const userRefs = userIsVisible ? await getCharacterRefs('user') : [];
+            if (s.useCharacterImage !== false && character && characterIsVisible && !(s.stylePreset === 'reference' && charRefs.length)) {
                 avatarData = await getCharacterAvatarDataUrl(character) || '';
             }
             if (avatarData) {
@@ -986,6 +992,8 @@ async function executeGenerationTask(task) {
                     dataUrl: avatarData,
                     label: '角色卡原图 · 第一优先级身份锚点',
                     kind: 'identity-primary',
+                    identityId: `character:${getCharacterIdentifier(character)}`,
+                    identityName: characterName || '当前角色',
                 });
             } else if (charRefs.length) {
                 const firstSavedRef = charRefs[0];
@@ -993,6 +1001,18 @@ async function executeGenerationTask(task) {
                     ...firstSavedRef,
                     label: `${firstSavedRef.label || '角色参考图'} · 第一优先级身份与画风锚点`,
                     kind: 'identity-primary',
+                    identityId: `character:${getCharacterIdentifier(character)}`,
+                    identityName: characterName || '当前角色',
+                });
+            }
+
+            for (const [index, ref] of userRefs.entries()) {
+                pushUniqueRef({
+                    ...ref,
+                    label: `${ref.label || 'User 参考图'} · ${userName}`,
+                    kind: refs.some(item => item.kind === 'identity-primary') || index > 0 ? 'identity-secondary' : 'identity-primary',
+                    identityId: 'user',
+                    identityName: userName,
                 });
             }
 
@@ -1005,7 +1025,12 @@ async function executeGenerationTask(task) {
             }
 
             for (const r of charRefs) {
-                pushUniqueRef({ ...r, kind: r.kind || 'identity-secondary' });
+                pushUniqueRef({
+                    ...r,
+                    kind: r.kind || 'identity-secondary',
+                    identityId: `character:${getCharacterIdentifier(character)}`,
+                    identityName: characterName || '当前角色',
+                });
             }
 
             prompt = cached?.confirmedPrompt || collapsePromptToSingleParagraph(buildSceneAwareImagePrompt({
@@ -1509,7 +1534,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.28</span>
+            <span class="rpig-header-version">v2.9.29</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2192,10 +2217,104 @@ function buildSettingsUI() {
     importRefsInput.on('change', handleReferenceImport);
     card6.body.append(exportRefsBtn, importRefsBtn, importRefsInput);
     card6.body.append(refsList);
+
+    const userRefsBox = $('<div class="rpig-sheet-gen-box" id="rpig-user-refs-box" style="margin-top:12px;"></div>');
+    const userRefsHeader = $('<div class="rpig-sheet-header"></div>');
+    const userRefsTitle = $('<span></span>');
+    userRefsHeader.append(userRefsTitle, $('<span class="rpig-sheet-tag">与角色卡参考图分开保存</span>'));
+    const userRefsHint = $('<div class="rpig-hint" style="margin-bottom:8px;"></div>').text('上传玩家 / User 的正面、侧面、背面或整张三视图。仅当剧情分析确认 User 实际入镜时，这些图片才会随请求发送。');
+    const userRefsList = $(document.createElement('div')).addClass('rpig-refs-list').attr('id', 'rpig-user-refs-list');
+    const userUploadInput = $('<input id="rpig-user-three-view-input" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif" multiple style="display:none">');
+    const userUploadBtn = $('<button type="button" class="menu_button" id="rpig-user-three-view-upload" style="width:100%;margin-top:6px;">👤 上传 User 三视图 / 多视角参考图</button>');
+    const userImportInput = $('<input type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.json,application/json" multiple style="display:none">');
+    const userImportBtn = $('<button type="button" class="menu_button">🖼 导入 User 图片 / 参考图包</button>');
+    const userExportBtn = $('<button type="button" class="menu_button">导出 User 参考图包</button>');
+
+    function currentUserDisplayName() {
+        const currentContext = getContext();
+        return String(currentContext?.name1 || [...(currentContext?.chat || [])].reverse().find(message => message?.is_user)?.name || 'User').trim();
+    }
+
+    async function refreshUserRefsList() {
+        const displayName = currentUserDisplayName();
+        userRefsTitle.text(`👤 User 三视图 / 多视角参考图 · ${displayName}`);
+        let views;
+        try { views = await getCharacterRefs('user'); }
+        catch (error) {
+            userRefsList.empty().append($('<div class="rpig-ref-empty">').text(error.message));
+            toastr.error(escapeHtml(error.message));
+            return;
+        }
+        userRefsList.empty();
+        if (!views.length) {
+            userRefsList.append($('<div class="rpig-ref-empty">').text(`尚未上传 ${displayName} 的三视图或多视角参考图。`));
+            return;
+        }
+        views.forEach((view, index) => {
+            const item = $(document.createElement('div')).addClass('rpig-ref-item');
+            const img = $(document.createElement('img')).attr('src', view.url || view.dataUrl).attr('alt', view.label || 'User 视图');
+            const label = $(document.createElement('span')).text(view.label || `User 视图 ${index + 1}`);
+            const del = $('<button title="删除 User 参考图">✕</button>');
+            del.on('click', async () => {
+                views.splice(index, 1);
+                try {
+                    await saveCharacterRefs('user', views);
+                    await refreshUserRefsList();
+                } catch (error) {
+                    toastr.error(`删除 User 参考图失败：${escapeHtml(error.message)}`);
+                }
+            });
+            item.append(img, label, del);
+            userRefsList.append(item);
+        });
+    }
+
+    const handleUserReferenceImport = async function (e) {
+        e?.preventDefault();
+        e?.stopPropagation();
+        e?.originalEvent?.stopImmediatePropagation();
+        const files = Array.from(this.files || []);
+        try {
+            if (!files.length) return;
+            if (files.length > MAX_BATCH_UPLOAD) throw new Error('单次最多导入 10 个图片或参考图包文件');
+            if (files.reduce((total, file) => total + file.size, 0) > MAX_REFERENCE_ARCHIVE_BYTES) throw new Error('本次导入总大小超过 30MB，请分批导入');
+            const imported = [];
+            for (const file of files) imported.push(...await readReferenceImport(file));
+            const existing = await getCharacterRefs('user');
+            if (existing.length + imported.length > MAX_REFS_PER_CHAR) throw new Error('导入后将超过 50 张 User 参考图上限，请先整理参考图');
+            await saveCharacterRefs('user', [...existing, ...imported]);
+            await refreshUserRefsList();
+            toastr.success(`已导入 ${imported.length} 张 User 参考图`);
+        } catch (error) {
+            console.error('[RP 电影配图] User 参考图导入失败:', error);
+            toastr.error(escapeHtml(error.message));
+        } finally { this.value = ''; }
+    };
+
+    userUploadBtn.on('click', () => userUploadInput.trigger('click'));
+    userImportBtn.on('click', () => userImportInput.trigger('click'));
+    userUploadInput.on('change', handleUserReferenceImport);
+    userImportInput.on('change', handleUserReferenceImport);
+    userExportBtn.on('click', async () => {
+        try {
+            const refs = await getCharacterRefs('user');
+            if (!refs.length) return toastr.info('此浏览器没有可导出的 User 参考图');
+            const text = await exportReferenceArchive(refs, fetchToDataUrl);
+            const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+            const a = document.createElement('a'); a.href = url; a.download = 'rpig-user-references.json';
+            document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (error) {
+            console.error('[RP 电影配图] User 参考图导出失败:', error);
+            toastr.error(escapeHtml(error.message));
+        }
+    });
+
+    userRefsBox.append(userRefsHeader, userRefsHint, userUploadBtn, userUploadInput, userImportBtn, userImportInput, userExportBtn, userRefsList);
+    card6.body.append(userRefsBox);
     grid.append(card6.card);
 
     container.append(grid);
-    setTimeout(() => { updateCharacterSelectorUI(); }, 100);
+    setTimeout(() => { updateCharacterSelectorUI(); refreshUserRefsList(); }, 100);
 
     return container;
 }
@@ -2205,7 +2324,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.28</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.29</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2607,7 +2726,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.28</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.29</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2698,5 +2817,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.28] 手机配置迁移、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.29] User 三视图、结构化焦点分析与完整工作台已启用。');
 });
