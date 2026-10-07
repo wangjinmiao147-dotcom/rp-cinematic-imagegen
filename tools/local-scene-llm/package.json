@@ -1,0 +1,11 @@
+{
+  "name": "rp-cinematic-local-scene-llm",
+  "version": "2.9.57",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Optional loopback scene-analysis fallback for RP cinematic imagegen",
+  "scripts": { "start": "node local-scene-llm.mjs" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "pinyin-pro": "3.29.4" }
+}

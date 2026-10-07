@@ -2,8 +2,9 @@
 // RP 电影配图 - 自动检测模块
 // ============================================================
 
-import { extractJson, scrubSensitiveText } from './utils.js';
+import { extractJson, scrubSensitiveText, RpigError } from './utils.js';
 import { buildDirectorPrompt, buildDialogueContext } from './prompts.js';
+import { assertUsableInstruction } from './analysis-validation.js';
 
 // 记录各会话最后检测的消息下标（按会话隔离）
 const lastDetectedIndexByChat = new Map();
@@ -173,11 +174,12 @@ export async function executeAutoDetection({
 
         const parsed = extractJson(rawLLM);
 
-        if (!parsed) {
-            if (typeof onStatusChange === 'function') {
-                onStatusChange('idle', '');
-            }
-            return;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.error || parsed.refusal) {
+            assertUsableInstruction(String(rawLLM || ''), '自动场景判断');
+            throw new RpigError('ANALYSIS_INVALID_JSON', '自动场景判断没有返回有效结果，已停止自动出图');
+        }
+        if (typeof parsed.scene_changed !== 'boolean') {
+            throw new RpigError('ANALYSIS_INVALID_SCHEMA', '自动场景判断缺少布尔型scene_changed，已停止自动出图');
         }
 
         // 场景未切换：不调用图片后端，节省资源与费用
@@ -192,7 +194,13 @@ export async function executeAutoDetection({
         }
 
         // 场景发生变化：再次确认会话有效性后触发图片生成
-        const prompt = (parsed.final_prompt || '').trim();
+        if (typeof parsed.final_prompt !== 'string'
+            || (parsed.avoid != null && typeof parsed.avoid !== 'string')
+            || (parsed.scene_anchor != null && typeof parsed.scene_anchor !== 'string')) {
+            throw new RpigError('ANALYSIS_INVALID_SCHEMA', '自动场景判断的提示词字段类型错误，已停止自动出图');
+        }
+        const prompt = parsed.final_prompt.trim();
+        assertUsableInstruction(prompt, '自动场景编辑指令');
         const avoid = (parsed.avoid || '').trim();
         const sceneAnchor = (parsed.scene_anchor || '').trim();
 

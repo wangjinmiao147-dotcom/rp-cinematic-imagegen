@@ -10,3 +10,20 @@ index.v*.js
 android-test-results.json
 
 android-gallery-results.json
+
+# Local diagnostics and personal runtime files are never public inputs.
+/debug*.mjs
+/executeGenerationTask_body*.txt
+/test_out.txt
+/tests_output*.txt
+/work/
+/outputs/
+.env
+.env.*
+*.gguf
+*.safetensors
+*.ckpt
+*.pth
+tools/local-scene-llm/local-scene-config.json
+tools/local-scene-llm/runtime/
+tools/local-scene-llm/models/

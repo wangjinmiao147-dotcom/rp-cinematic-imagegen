@@ -24,7 +24,13 @@ export async function readReferenceImport(file, convert = blobToDataUrl) {
 export async function exportReferenceArchive(refs, fetchImage) {
     const hydrated = await hydrateReferenceImages(refs, fetchImage, 50);
     const text = JSON.stringify({ format: 'rpig-references', version: 1,
-        views: hydrated.map(ref => ({ label: String(ref.label || '参考图'), dataUrl: ref.dataUrl })) });
+        views: hydrated.map(ref => ({
+            label: String(ref.label || '参考图'),
+            dataUrl: ref.dataUrl,
+            isPrimaryIdentity: !!ref.isPrimaryIdentity,
+            viewType: ['single', 'full_body', 'three_views', 'face_crop'].includes(ref.viewType) ? ref.viewType : 'single',
+            enabled: ref.enabled !== false,
+        })) });
     if (new Blob([text]).size > MAX_REFERENCE_ARCHIVE_BYTES) throw new RpigError('REFERENCE_ARCHIVE_TOO_LARGE', '参考图包超过 30MB，请分批迁移');
     return text;
 }
@@ -38,6 +44,12 @@ export function parseReferenceArchive(text) {
         if (typeof ref?.dataUrl !== 'string' || !/^data:image\/(png|jpeg|webp|gif|avif);base64,[A-Za-z0-9+/]+={0,2}$/.test(ref.dataUrl)) throw new RpigError('REFERENCE_ARCHIVE_INVALID', '参考图包必须包含完整图片数据，不能只包含另一设备的文件地址');
         try { if (!dataUrlToBlob(ref.dataUrl).size) throw new Error('empty'); }
         catch { throw new RpigError('REFERENCE_ARCHIVE_INVALID', '参考图 Base64 数据无效'); }
-        return { label: String(ref.label || '导入参考图').slice(0, 160), dataUrl: ref.dataUrl };
+        return {
+            label: String(ref.label || '导入参考图').slice(0, 160),
+            dataUrl: ref.dataUrl,
+            isPrimaryIdentity: !!ref.isPrimaryIdentity,
+            viewType: ['single', 'full_body', 'three_views', 'face_crop'].includes(ref.viewType) ? ref.viewType : 'single',
+            enabled: ref.enabled !== false,
+        };
     });
 }

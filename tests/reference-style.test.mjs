@@ -6,21 +6,22 @@ const settings={backend:'openai',backendUrl:'https://fixture.test/v1',backendMod
 const refs=[{dataUrl:'data:image/png;base64,YWJj',kind:'identity-primary'},{dataUrl:'data:image/png;base64,ZGVm',kind:'identity-secondary'}];
 for(const build of [buildDirectorPrompt,buildOmniscientPrompt,buildFinalizerPrompt])test(`${build.name} uses story-only editing instructions`,()=>{
  const p=build({stylePreset:'reference',currentMessageText:'She sits by the window.',promptFormat:'tags'});
- assert.match(p.system,/你没有看到这些图片/);assert.match(p.system,/只总结最新剧情/);
+ assert.match(p.system,/看不到图片/);assert.match(p.system,/最新正文/);
+ assert.match(p.system,/所选单一瞬间/);assert.match(p.system,/环境未知时留给统一模板/);
  assert.doesNotMatch(p.system,/photorealistic|35mm film|masterpiece|电影质感/);
  assert.match(p.userText,/She sits by the window/);
 });
 test('reference mode rejects missing identity input before any network call',async t=>{
  let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;throw Error('unexpected fetch')});
- await assert.rejects(generateImage(settings,'action','',[]),{code:'REFERENCE_REQUIRED'});
- await assert.rejects(generateImage(settings,'action','',[{...refs[0],kind:'continuity'}]),{code:'REFERENCE_REQUIRED'});assert.equal(calls,0);
+ await assert.rejects(generateImage(settings,'action','',[]),{code:'IDENTITY_REFERENCE_REQUIRED'});
+ await assert.rejects(generateImage(settings,'action','',[{...refs[0],kind:'continuity'}]),{code:'IDENTITY_REFERENCE_REQUIRED'});assert.equal(calls,0);
 });
 test('reference mode sends uploaded images together to edits and locks visual style',async t=>{
  const calls=[];t.mock.method(globalThis,'fetch',async(url,options)=>{calls.push({url,options});return new Response(JSON.stringify({data:[{b64_json:'YWJj'}]}),{status:200});});
  const result=await generateImage(settings,'Have the character sit by the window.','',refs);
  assert.equal(calls.length,1);assert.ok(calls[0].url.endsWith('/images/edits'));
  const form=calls[0].options.body;assert.equal(form.getAll('image[]').length,2);
- assert.match(form.get('prompt'),/authoritative for visual style/);assert.match(form.get('prompt'),/sit by the window/);assert.equal(result.usedRefs,true);
+ assert.match(form.get('prompt'),/Use image 1|image 1.*style/i);assert.match(form.get('prompt'),/sit by the window/);assert.equal(result.usedRefs,true);
 });
 test('reference mode labels User and role character images as separate identities',async t=>{
  const calls=[];t.mock.method(globalThis,'fetch',async(url,options)=>{calls.push({url,options});return new Response(JSON.stringify({data:[{b64_json:'YWJj'}]}),{status:200});});
@@ -30,8 +31,8 @@ test('reference mode labels User and role character images as separate identitie
  ];
  await generateImage(settings,'Role and Player talk.','',namedRefs);
  const prompt=calls[0].options.body.get('prompt');
- assert.match(prompt,/image 1 = Role/);assert.match(prompt,/image 2 = Player/);
- assert.match(prompt,/different identity names depict different cast members/);
+ assert.match(prompt,/Reference image 1: Role/);assert.match(prompt,/Reference image 2: Player/);
+ assert.match(prompt,/Keep different identities separate/);
 });
 test('reference mode never falls back after edits fails',async t=>{
  const calls=[];t.mock.method(globalThis,'fetch',async url=>{calls.push(url);return new Response('edits unsupported',{status:405})});
@@ -60,5 +61,5 @@ test('SD cannot silently consume just the first of multiple references',async t=
 test('invalid sixth reference fails rather than disappearing beyond an old cap',async t=>{
  let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;throw Error('unexpected')});
  const six=Array.from({length:5},(_,i)=>({dataUrl:`data:image/png;base64,${Buffer.from(`ref${i}`).toString('base64')}`}));six.push({});
- await assert.rejects(generateImage(settings,'action','',six),{code:'REFERENCE_MISSING'});assert.equal(calls,0);
+ await assert.rejects(generateImage(settings,'action','',six),{code:'REFERENCE_INVALID'});assert.equal(calls,0);
 });

@@ -40,10 +40,11 @@ export function extractChatCompletionText(data) {
  * @param {Function} [getContextFn] 
  * @returns {Promise<string>}
  */
-export async function callLLM(system, user, settings, getContextFn, options = {}) {
+async function callLLMOnce(system, user, settings, getContextFn, options = {}) {
     const s = settings || {};
     const signal = options.signal;
     throwIfAborted(signal);
+    const requestSignal = combineAbortSignals(signal, timeoutSignal(options.requestTimeoutMs || 120000));
     const context = typeof getContextFn === 'function' ? getContextFn() : null;
 
     if (s.llmSource === 'tavern') {
@@ -57,7 +58,7 @@ export async function callLLM(system, user, settings, getContextFn, options = {}
                 quietPrompt: fullPrompt,
                 quietToLoud: false,
                 skipWIAN: false,
-            }), signal);
+            }), requestSignal);
 
             if (typeof result === 'string' && result.trim()) {
                 return result.trim();
@@ -102,7 +103,7 @@ export async function callLLM(system, user, settings, getContextFn, options = {}
                 temperature: 0.7,
                 ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
             }),
-            signal: combineAbortSignals(signal, timeoutSignal(120000)),
+            signal: requestSignal,
         });
 
     let res;
@@ -127,4 +128,51 @@ export async function callLLM(system, user, settings, getContextFn, options = {}
         throw new Error('LLM 返回内容为空');
     }
     return content;
+}
+
+
+export function looksLikeModelRefusal(text) {
+    const raw=String(text||'').trim();
+    if(/^[\[{]/.test(raw))return false;
+    return /^(?:抱歉|很抱歉|对不起|我(?:不能|无法|不可以)|I\s*(?:am sorry|['’]m sorry|cannot|can['’]t|am unable|won['’]t)|Sorry[,，:：])/i.test(raw);
+}
+export function fallbackReason(error) {
+    if(error?.code==='LLM_REFUSAL')return 'refusal';
+    if(isAbortError(error)||/timeout|timed out|超时/i.test(error?.message||''))return 'timeout';
+    if(/^ANALYSIS_/.test(error?.code||''))return 'invalid_analysis';
+    return 'request_error';
+}
+export async function callLLM(system,user,settings,getContextFn,options={}) {
+    const s=settings||{};
+    throwIfAborted(options.signal);
+    const fallback=s.llmFallbackEnabled===true;
+    const validate=async raw=>{
+        if(looksLikeModelRefusal(raw)){
+            const error=new Error('文字模型拒绝完成本阶段分析');error.code='LLM_REFUSAL';throw error;
+        }
+        if(typeof options.validateResponse==='function')await options.validateResponse(raw);
+        return raw;
+    };
+    try{
+        const primaryMs=fallback?Math.max(10,Math.min(180,Number(s.llmPrimaryTimeoutSeconds)||60))*1000:120000;
+        const raw=await callLLMOnce(system,user,s,getContextFn,{...options,requestTimeoutMs:primaryMs});
+        return await validate(raw);
+    }catch(error){
+        throwIfAborted(options.signal);
+        if(!fallback)throw error;
+        const fallbackUrl=String(s.llmFallbackUrl||'').trim(),fallbackModel=String(s.llmFallbackModel||'').trim();
+        if(!fallbackUrl||!fallbackModel)throw new Error('本地回退配置不完整，请填写接口地址和模型名称');
+        const reason=fallbackReason(error);
+        options.onFallback?.({reason});
+        const seconds=Math.max(30,Math.min(600,Number(s.llmFallbackTimeoutSeconds)||180));
+        const local={...s,llmSource:'custom',llmUrl:fallbackUrl,llmModel:fallbackModel,llmKey:''};
+        try{
+            const raw=await callLLMOnce(system,user,local,null,{...options,requestTimeoutMs:(seconds+20)*1000});
+            return await validate(raw);
+        }catch(localError){
+            throwIfAborted(options.signal);
+            const failed=new Error('本阶段云端未完成，本地回退也未通过：'+localError.message);
+            failed.code=localError.code||'LLM_FALLBACK_FAILED';throw failed;
+        }
+    }
 }

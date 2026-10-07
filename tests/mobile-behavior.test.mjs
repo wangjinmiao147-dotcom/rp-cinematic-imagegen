@@ -37,13 +37,13 @@ test('failed reference download stops before calling a billed image endpoint', a
     let calls = 0; t.mock.method(globalThis, 'fetch', async () => { calls++; return response(200, {}); });
     await assert.rejects(generateImage(settings, 'test', '', [{ url: 'https://image.test/expired' }], {
         fetchToDataUrl: async () => { throw new Error('HTTP 410'); },
-    }), e => e.code === 'REFERENCE_DOWNLOAD_FAILED' && /410/.test(e.message));
+    }), e => e.code === 'REFERENCE_DOWNLOAD_FAILED' && /image.test\/expired/.test(e.message));
     assert.equal(calls, 0);
 });
 
 test('partial reference failure cannot silently discard identity or continuity', async () => {
     await assert.rejects(hydrateReferenceImages([{ dataUrl: png }, { url: '/missing.png' }], async () => { throw new Error('404'); }), { code: 'REFERENCE_DOWNLOAD_FAILED' });
-    await assert.rejects(hydrateReferenceImages([{}]), { code: 'REFERENCE_MISSING' });
+    await assert.rejects(hydrateReferenceImages([{}]), { code: 'REFERENCE_INVALID' });
     await assert.rejects(generateOpenAIImage(settings, 'test', '1024x1024', [{}]), { code: 'REFERENCE_MISSING' });
 });
 
@@ -98,7 +98,7 @@ test('download rejects HTTP errors, HTML login pages and empty image bodies', as
 test('portable archive embeds bytes, omits URLs/extra settings, rejects URL-only imports', async () => {
     const archive=await exportReferenceArchive([{url:'/pc-only/image.png',label:'front',apiKey:'secret'}],async()=>png);
     assert.equal(archive.includes('pc-only'),false); assert.equal(archive.includes('secret'),false);
-    assert.deepEqual(parseReferenceArchive(archive),[{label:'front',dataUrl:png}]);
+    assert.deepEqual(parseReferenceArchive(archive),[{label:'front',dataUrl:png,isPrimaryIdentity:false,viewType:'single',enabled:true}]);
     assert.throws(()=>parseReferenceArchive(JSON.stringify({format:'rpig-references',version:1,views:[{url:'/pc-only.png'}]})),{code:'REFERENCE_ARCHIVE_INVALID'});
 });
 

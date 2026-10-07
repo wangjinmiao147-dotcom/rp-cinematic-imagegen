@@ -1,5 +1,12 @@
+import { loadWorldInfo } from '../../../world-info.js';
+import { getCurrentWorldAgeContext } from './src/character-world-context.js';
+import { parseAnalysisResponse } from './src/analysis-validation.js';
+import { isLocalQwen, qwenSteps, activeReferenceViews } from './src/qwen.js';
+import { composeStoryEdit, hasRequestedThoughtBubble } from './src/visual-constraints.js';
+import { buildVersionedSceneState, getPreviousSceneState, getEffectivePreviousState, getIllustrationFacts, storyFingerprint, canUseContinuityReference } from './src/scene-state.js';
+import { sanitizeDiagnostics, persistGenerationDiagnostics } from './src/diagnostics.js';
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.29
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.57
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -11,8 +18,9 @@ import {
     eventSource,
     event_types,
     updateMessageBlock,
+    doNavbarIconClick,
 } from '../../../../script.js';
-import { saveBase64AsFile } from '../../../utils.js';
+import { saveBase64AsFile, toggleDrawer } from '../../../utils.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 
 import {
@@ -35,6 +43,8 @@ import {
 import { initializeFloatingUI, keepFloatingUIVisible, placeFloatingElement, viewportBounds, fitViewportOverlay } from './src/floating-ui.js';
 import { exportReferenceArchive, readReferenceImport, MAX_REFERENCE_ARCHIVE_BYTES } from './src/reference-transfer.js';
 import { createImageRetryCache, imageRetrySignature } from './src/image-retry.js';
+import { openLocalDetailEditor } from './src/local-detail.js';
+import { captureLocalDetailSource, saveLocalDetailCandidate } from './src/local-detail-save.js';
 
 import {
     DEFAULT_SD_NEGATIVE,
@@ -42,6 +52,16 @@ import {
     SHOT_MODE_INSTRUCTIONS,
     FORMAT_INSTRUCTIONS,
     DIRECTOR_SYSTEM_PROMPT,
+    OMNISCIENT_SYSTEM_PROMPT,
+    FINALIZER_SYSTEM_PROMPT,
+    STORY_FACTS_SYSTEM_PROMPT,
+    RELATION_CHECKER_SYSTEM_PROMPT,
+    EDIT_INSTRUCTION_SYSTEM_PROMPT,
+    UNIFIED_STYLE_IDENTITY_TEMPLATE,
+    buildStoryFactsPrompt,
+    buildRelationCheckerPrompt,
+    buildEditInstructionPrompt,
+    assembleUnifiedPrompt,
     getCharacterVisualAnchor,
     buildDialogueContext,
     buildDirectorPrompt,
@@ -57,6 +77,7 @@ import {
     BACKENDS,
     SIZE_MAP,
     generateImage,
+    generateLocalDetailEdit,
 } from './src/backends.js';
 
 import { callLLM } from './src/llm.js';
@@ -85,6 +106,7 @@ import {
 } from './src/auto.js';
 
 import { normalizeCastCharacters } from './src/cast.js';
+import { resolveCastReferencePlan } from './src/character-identities.js';
 
 // ------------------------------------------------------------
 // 常量定义与默认设置
@@ -114,12 +136,17 @@ const defaultSettings = {
     autoCooldown: 3,     // 至少间隔 N 条消息才再次检测
     autoWindow: 12,      // 分析最近 N 条消息
     previewBeforeGeneration: true, // 手动生成时预览并可编辑最终提示词
-    imageRetryMode: 'reuse', // 失败重试时复用分析，或由用户选择重新分析
+    imageRetryMode: 'reanalyze', // 失败重试时复用分析，或由用户选择重新分析
     // LLM（剧情检测与配图提示词生成）
     llmSource: 'tavern', // tavern=复用酒馆当前LLM, custom=扩展内独立配置
     llmUrl: '',
     llmKey: '',
     llmModel: '',
+    llmFallbackEnabled: false,
+    llmFallbackUrl: 'http://127.0.0.1:11436/v1',
+    llmFallbackModel: 'rp-scene-qwen35-9b',
+    llmPrimaryTimeoutSeconds: 60,
+    llmFallbackTimeoutSeconds: 180,
     // 最终提示词总结 LLM（默认复用上方剧情 LLM）
     finalLlmSource: 'same',
     finalLlmUrl: '',
@@ -127,11 +154,22 @@ const defaultSettings = {
     finalLlmModel: '',
     // 形象与参考图
     useCharacterImage: true,
-    usePreviousImage: true,
+    usePreviousImage: false,
     hideHandsFeet: false,
     continuityDenoising: 0.48,
     characterAnchors: {},
     selectedTargetCharacter: 'auto',
+    // 本地 Qwen 桥接专有设置
+    isLocalQwenBridge: false,
+    qwenResolution: '512x288', // 默认512轻量档；保留768/1024手动选项
+    qwenSteps: 20,
+    qwenCfg: 1.0,
+    qwenSeed: -1, // -1 表示随机
+    qwenReferenceProfile: 'balanced',
+    qwenIdentityDetailBoost: false,
+    qwenSceneDetail: false,
+    qwenReferencePolicy: 'story',
+    qwenCacheType: 'q8_0',
 };
 
 function getSettings() {
@@ -161,6 +199,23 @@ function loadSettings() {
     }
     // 迁移已有设置：禁用手脚裁切旧约束
     s.hideHandsFeet = false;
+    if (!s.qwenStoryPresetV2) {
+        s.qwenIdentityDetailBoost = false;
+        s.qwenReferencePolicy = 'story';
+        s.qwenStoryPresetV2 = true;
+        saveSettingsDebounced();
+    }
+    if (!s.qwenLightOutputV1) {
+        s.qwenResolution = '512x288';
+        s.qwenIdentityDetailBoost = false;
+        s.qwenLightOutputV1 = true;
+        saveSettingsDebounced();
+    }
+    if (!s.qwenBoundedStepsV1) {
+        if (!(Number(s.qwenSteps) >= 12 && Number(s.qwenSteps) <= 25)) s.qwenSteps = 16;
+        s.qwenBoundedStepsV1 = true;
+        saveSettingsDebounced();
+    }
 }
 
 function parseDirectorLlmOutput(raw) {
@@ -301,7 +356,8 @@ function enforceOmniscientEnsemble(prompt, visibleCharacters, excludedCharacters
     const names = Array.isArray(visibleCharacters) ? visibleCharacters.filter(Boolean).slice(0, 12) : [];
     if (!names.length) return collapsePromptToSingleParagraph(prompt);
     const shot = names.length === 1 ? 'single-character medium shot' : names.length === 2 ? 'balanced two-shot' : 'clear group ensemble shot';
-    const ensembleRule = `The visible cast is locked to exactly ${names.length} distinct ${names.length === 1 ? 'person' : 'people'}: ${names.join(', ')}. Use one unified ${shot}; show every listed person exactly once with a distinct body, face, position, gaze, and action. Do not add anyone outside this cast, including extra people, bystanders, crowds, reflected people, portraits, or duplicated bodies.`;
+    const bubbleException = hasRequestedThoughtBubble(prompt) ? ' The explicitly requested same-person avatar inside the thought bubble is a symbolic representation, not a physical cast member.' : '';
+    const ensembleRule = `The visible main cast is locked to exactly ${names.length} distinct physical ${names.length === 1 ? 'person' : 'people'}: ${names.join(', ')}. Use one unified ${shot} for the physical scene; show every listed physical person exactly once.${bubbleException} Do not add any other physical people, bystanders, or crowds.`;
     const excluded = Array.isArray(excludedCharacters) ? excludedCharacters.filter(Boolean).slice(0, 12) : [];
     const exclusionRule = excluded.length
         ? `The following story participants are explicitly off-camera and must not appear in any form: ${excluded.join(', ')}.`
@@ -309,27 +365,233 @@ function enforceOmniscientEnsemble(prompt, visibleCharacters, excludedCharacters
     return collapsePromptToSingleParagraph(`${ensembleRule} ${exclusionRule} ${prompt}`);
 }
 
-async function getCharacterAvatarDataUrl(character) {
+async function getCharacterAvatarInfo(character, { fullOnly = false } = {}) {
     if (!character || !character.avatar) return null;
     const context = getContext();
-    const urls = [];
-    urls.push(`/characters/${encodeURIComponent(character.avatar)}`);
-    urls.push(`characters/${encodeURIComponent(character.avatar)}`);
-    if (typeof context.getThumbnailUrl === 'function') {
-        urls.push(context.getThumbnailUrl('avatar', character.avatar));
-    }
-    urls.push(`/thumbnail?type=avatar&file=${encodeURIComponent(character.avatar)}`);
-
-    const errors = [];
-    for (const url of [...new Set(urls)]) {
+    const fullUrls = [
+        `/characters/${encodeURIComponent(character.avatar)}`,
+        `characters/${encodeURIComponent(character.avatar)}`,
+    ];
+    for (const url of [...new Set(fullUrls)]) {
         try {
-            return await fetchToDataUrl(url, { timeoutMs: 6000 });
-        } catch (error) {
-            errors.push(error.message);
-            console.warn('[RP 电影配图] 角色卡参考图读取失败:', error);
-        }
+            const dataUrl = await fetchToDataUrl(url, { timeoutMs: 6000 });
+            if (dataUrl) {
+                return {
+                    dataUrl,
+                    isThumbnail: false,
+                    source: 'character-card',
+                    label: '角色卡完整原图',
+                };
+            }
+        } catch (e) {}
     }
-    throw new RpigError('REFERENCE_AVATAR_FAILED', `角色卡原图和缩略图均读取失败，已停止生成。${errors.join('；')}`);
+    if (fullOnly) return null;
+
+    const thumbUrls = [];
+    if (typeof context.getThumbnailUrl === 'function') {
+        thumbUrls.push(context.getThumbnailUrl('avatar', character.avatar));
+    }
+    thumbUrls.push(`/thumbnail?type=avatar&file=${encodeURIComponent(character.avatar)}`);
+    for (const url of [...new Set(thumbUrls)]) {
+        try {
+            const dataUrl = await fetchToDataUrl(url, { timeoutMs: 6000 });
+            if (dataUrl) {
+                return {
+                    dataUrl,
+                    isThumbnail: true,
+                    source: 'character-thumbnail',
+                    label: '角色卡缩略图（非完整原图）',
+                };
+            }
+        } catch (e) {}
+    }
+    return null;
+}
+
+async function getCharacterAvatarDataUrl(character) {
+    const info = await getCharacterAvatarInfo(character, { fullOnly: false });
+    if (info && info.dataUrl) return info.dataUrl;
+    throw new RpigError('REFERENCE_AVATAR_FAILED', '角色卡原图和缩略图均读取失败，已停止生成。');
+}
+
+
+
+async function resolveCharacterReferences(charObj, charName, isVisible) {
+    if (!charObj || !isVisible) return { primaryRef: null, supportingRefs: [], primarySource: null };
+    const savedRefs = activeReferenceViews(await getCharacterRefs(charObj));
+    const charIdentifier = `character:${getCharacterIdentifier(charObj)}`;
+    const displayName = charName || charObj.name || '当前角色';
+
+    // 1. 用户明确指定的主身份图
+    const explicitPrimary = savedRefs.find(r => r.isPrimaryIdentity === true);
+    if (explicitPrimary) {
+        const primaryRef = {
+            ...explicitPrimary,
+            kind: 'identity-primary',
+            role: 'identity-primary',
+            source: 'explicit-saved',
+            label: `${explicitPrimary.label || '指定参考图'} · 用户显式指定主身份`,
+            isExplicitPrimary: true,
+            identityId: charIdentifier,
+            identityName: displayName,
+        };
+        const supportingRefs = savedRefs
+            .filter(r => r !== explicitPrimary)
+            .map((r, i) => ({
+                ...r,
+                kind: 'identity-supporting',
+                role: 'identity-supporting',
+                source: 'saved-supporting',
+                label: `${r.label || `辅助参考图 ${i + 1}`} · 辅助细节`,
+                isExplicitPrimary: false,
+                identityId: charIdentifier,
+                identityName: displayName,
+            }));
+        return { primaryRef, supportingRefs, primarySource: 'explicit-saved' };
+    }
+
+    // 2. 未指定时，使用角色卡完整原图
+    let avatarInfo = null;
+    try {
+        avatarInfo = await getCharacterAvatarInfo(charObj, { fullOnly: true });
+    } catch (e) {
+        console.warn('[RP] 获取角色卡完整原图异常:', e);
+    }
+
+    if (avatarInfo && !avatarInfo.isThumbnail && avatarInfo.dataUrl) {
+        const primaryRef = {
+            dataUrl: avatarInfo.dataUrl,
+            kind: 'identity-primary',
+            role: 'identity-primary',
+            source: 'character-card',
+            label: '角色卡完整原图 · 默认主身份',
+            isExplicitPrimary: false,
+            identityId: charIdentifier,
+            identityName: displayName,
+        };
+        const supportingRefs = savedRefs.map((r, i) => ({
+            ...r,
+            kind: 'identity-supporting',
+            role: 'identity-supporting',
+            source: 'saved-supporting',
+            label: `${r.label || `辅助参考图 ${i + 1}`} · 辅助细节`,
+            isExplicitPrimary: false,
+            identityId: charIdentifier,
+            identityName: displayName,
+        }));
+        return { primaryRef, supportingRefs, primarySource: 'character-card' };
+    }
+
+    // 3. 完整原图不可用时，明确提示，并选择可用的保存参考图作为兜底
+    if (savedRefs.length > 0) {
+        const fallbackRef = savedRefs[0];
+        if (typeof toastr !== 'undefined') {
+            toastr.info(`角色卡完整原图不可用，已自动采用保存参考图「${fallbackRef.label || '参考图 1'}」作为主身份兜底`);
+        }
+        const primaryRef = {
+            ...fallbackRef,
+            kind: 'identity-primary',
+            role: 'identity-primary',
+            source: 'saved-fallback',
+            label: `${fallbackRef.label || '保存参考图 1'} · 兜底主身份`,
+            isExplicitPrimary: false,
+            identityId: charIdentifier,
+            identityName: displayName,
+        };
+        const supportingRefs = savedRefs.slice(1).map((r, i) => ({
+            ...r,
+            kind: 'identity-supporting',
+            role: 'identity-supporting',
+            source: 'saved-supporting',
+            label: `${r.label || `辅助参考图 ${i + 2}`} · 辅助细节`,
+            isExplicitPrimary: false,
+            identityId: charIdentifier,
+            identityName: displayName,
+        }));
+        return { primaryRef, supportingRefs, primarySource: 'saved-fallback' };
+    }
+
+    // 4. 若无保存参考图，且只能读取缩略图
+    let thumbInfo = null;
+    try {
+        thumbInfo = await getCharacterAvatarInfo(charObj, { fullOnly: false });
+    } catch (e) {}
+
+    if (thumbInfo && thumbInfo.dataUrl) {
+        const isThumb = thumbInfo.isThumbnail;
+        if (typeof toastr !== 'undefined') {
+            toastr.warning(isThumb ? '未找到完整原图与保存参考图，本次仅使用角色卡缩略图作为主身份' : '已采用角色卡原图');
+        }
+        const primaryRef = {
+            dataUrl: thumbInfo.dataUrl,
+            kind: 'identity-primary',
+            role: 'identity-primary',
+            source: isThumb ? 'character-thumbnail' : 'character-card',
+            label: isThumb ? '角色卡缩略图（非完整原图） · 主身份' : '角色卡原图 · 主身份',
+            isExplicitPrimary: false,
+            identityId: charIdentifier,
+            identityName: displayName,
+        };
+        return { primaryRef, supportingRefs: [], primarySource: isThumb ? 'character-thumbnail' : 'character-card' };
+    }
+
+    return { primaryRef: null, supportingRefs: [], primarySource: null };
+}
+
+async function resolveUserReferences(userName, isVisible) {
+    if (!isVisible) return { primaryRef: null, supportingRefs: [], primarySource: null };
+    const savedRefs = activeReferenceViews(await getCharacterRefs('user'));
+    if (!savedRefs || !savedRefs.length) return { primaryRef: null, supportingRefs: [], primarySource: null };
+
+    const explicitPrimary = savedRefs.find(r => r.isPrimaryIdentity === true);
+    if (explicitPrimary) {
+        const primaryRef = {
+            ...explicitPrimary,
+            kind: 'identity-primary',
+            role: 'identity-primary',
+            source: 'explicit-saved',
+            label: `${explicitPrimary.label || 'User 参考图'} · User 指定主身份`,
+            isExplicitPrimary: true,
+            identityId: 'user',
+            identityName: userName || 'User',
+        };
+        const supportingRefs = savedRefs
+            .filter(r => r !== explicitPrimary)
+            .map((r, i) => ({
+                ...r,
+                kind: 'identity-supporting',
+                role: 'identity-supporting',
+                source: 'saved-supporting',
+                label: `${r.label || `User 视图 ${i + 1}`} · User 辅助细节`,
+                isExplicitPrimary: false,
+                identityId: 'user',
+                identityName: userName || 'User',
+            }));
+        return { primaryRef, supportingRefs, primarySource: 'explicit-saved' };
+    }
+
+    const firstRef = savedRefs[0];
+    const primaryRef = {
+        ...firstRef,
+        kind: 'identity-primary',
+        role: 'identity-primary',
+        source: 'saved-fallback',
+        label: `${firstRef.label || 'User 参考图 1'} · User 默认主身份`,
+        isExplicitPrimary: false,
+        identityId: 'user',
+        identityName: userName || 'User',
+    };
+    const supportingRefs = savedRefs.slice(1).map((r, i) => ({
+        ...r,
+        kind: 'identity-supporting',
+        role: 'identity-supporting',
+        source: 'saved-supporting',
+        label: `${r.label || `User 视图 ${i + 2}`} · User 辅助细节`,
+        isExplicitPrimary: false,
+        identityId: 'user',
+        identityName: userName || 'User',
+    }));
+    return { primaryRef, supportingRefs, primarySource: 'saved-fallback' };
 }
 
 function migrateLegacyMedia(message) {
@@ -360,7 +622,7 @@ function bindMediaLightbox(messageIndex) {
     const el = $(`.mes[mesid="${messageIndex}"]`);
     if (!el.length) return;
     el.find('img.mes_img').off('click.rpig').on('click.rpig', function () {
-        openLightbox($(this).attr('src'), $(this).attr('title') || '');
+        openLightbox($(this).attr('src'), $(this).attr('title') || '', { messageIndex });
     });
 }
 
@@ -393,12 +655,26 @@ function ensureFallbackMediaRender(messageIndex, message) {
     bindMediaLightbox(messageIndex);
 }
 
-function openLightbox(src, title) {
+function openLightbox(src, title, sourceMeta = {}) {
     if (!src) return;
     const overlay = $('<div class="rpig-lightbox"></div>');
     const img = $('<img class="rpig-lightbox-img">').attr('src', src);
     const cap = $('<div class="rpig-lightbox-caption"></div>').text(title || '');
     overlay.append(img).append(cap);
+
+    if (isLocalQwen(getSettings()) && (Number.isInteger(sourceMeta.messageIndex) || sourceMeta.character)) {
+        const actions = $('<div class="rpig-lightbox-actions"></div>');
+        const refine = $('<button type="button" class="menu_button rpig-lightbox-refine">局部精修</button>');
+        refine.on('click', async event => {
+            event.stopPropagation();
+            refine.prop('disabled', true);
+            try { await refineExistingIllustration(src, sourceMeta); }
+            catch (error) { toastr.error(scrubSensitiveText(error.message || String(error)), '', { escapeHtml: true }); }
+            finally { refine.prop('disabled', false); }
+        });
+        actions.append(refine);
+        overlay.append(actions);
+    }
 
     let releaseViewport = () => {};
     const closeHandler = () => {
@@ -407,12 +683,45 @@ function openLightbox(src, title) {
         overlay.remove();
     };
 
-    overlay.on('click', closeHandler);
+    overlay.on('click', event => { if (event.target === overlay[0] || event.target === img[0]) closeHandler(); });
     $(document).off('keydown.rpigLightbox').on('keydown.rpigLightbox', (e) => {
         if (e.key === 'Escape') closeHandler();
     });
     $('body').append(overlay);
     releaseViewport = fitViewportOverlay(overlay[0]);
+}
+
+async function refineExistingIllustration(sourceUrl, sourceMeta) {
+    const context = getContext();
+    const character = sourceMeta.character || (Number.isInteger(sourceMeta.messageIndex)
+        ? getCharacterForMessage(context.chat?.[sourceMeta.messageIndex]) : getCurrentCharacter());
+    const snapshot = captureLocalDetailSource({ context, sourceUrl, character,
+        messageIndex: sourceMeta.messageIndex, baseURI: document.baseURI });
+    const settings = { ...getSettings() };
+    const controller = new AbortController();
+    rpigDetailEditorControllers.add(controller);
+    try { return await openLocalDetailEditor({
+        signal: controller.signal,
+        sourceUrl, fetchToDataUrl, cropOptions: { minContext: 90, feather: 4 },
+        onGenerate: payload => queueLocalDetailEdit(payload, settings, snapshot),
+        onSave: async candidate => {
+            const result = await saveLocalDetailCandidate(snapshot, candidate, {
+                getContext, persistMediaUrl, saveBase64AsFile, fetchToDataUrl, saveToGallery,
+                diagnosticKeys: [settings.backendKey, settings.llmKey, settings.finalLlmKey].filter(Boolean),
+                updateMessage: async (_index, _message, capturedContext) => {
+                    if (typeof capturedContext.saveChat !== 'function') throw new Error('当前会话无法保存，候选已保留');
+                    await capturedContext.saveChat();
+                },
+                renderMessage: (messageIndex, message) => {
+                    updateMessageBlock(messageIndex, message);
+                    ensureFallbackMediaRender(messageIndex, message);
+                },
+            });
+            if (result.galleryWarning) toastr.warning('候选已保存到聊天，图库归档失败；可从聊天打开');
+            else toastr.success('局部精修已另存，原图保留');
+            return result;
+        },
+    }); } finally { rpigDetailEditorControllers.delete(controller); }
 }
 
 async function openGallery(characterOrId) {
@@ -462,7 +771,7 @@ async function openGallery(characterOrId) {
             card.find('.rpig-gallery-card-title').text(entry.title || '配图');
             card.find('.rpig-gallery-card-time').text(new Date(entry.time || Date.now()).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }));
 
-            card.find('img').on('click', () => openLightbox(src, entry.title || '配图'));
+            card.find('img').on('click', () => openLightbox(src, entry.title || '配图', { character }));
             card.find('.rpig-dl').on('click', (e) => {
                 e.stopPropagation();
                 const a = document.createElement('a');
@@ -514,6 +823,7 @@ let rpigGenerating = false;
 let rpigActiveTask = null;
 let rpigTaskSequence = 0;
 const rpigGenerationQueue = [];
+const rpigDetailEditorControllers = new Set();
 const rpigImageRetryCache = createImageRetryCache();
 
 function setGenStatus(phase, text) {
@@ -549,17 +859,18 @@ function updateGenerationQueueUI() {
     $('#rpig-cancel-current').prop('disabled', !active);
     $('#rpig-clear-queue').prop('disabled', waiting === 0);
     if (summary.length) {
-        const activeLabel = active ? `进行中：消息 ${active.messageIndex + 1}` : '当前无运行任务';
+        const activeLabel = active ? (active.kind === 'local-detail' ? '进行中：局部精修' : `进行中：消息 ${active.messageIndex + 1}`) : '当前无运行任务';
         summary.text(`${activeLabel} · 排队 ${waiting}`);
     }
     if (taskList.length) {
         taskList.empty().toggle(waiting > 0);
         for (const [index, task] of rpigGenerationQueue.entries()) {
             const mode = task.explicitShotMode || getSettings()?.shotMode || 'snapshot';
-            const label = mode === 'portrait' ? '表情特写' : '剧情剧照';
+            const label = task.kind === 'local-detail' ? '局部精修' : (mode === 'portrait' ? '表情特写' : '剧情剧照');
+            const sourceLabel = task.kind === 'local-detail' ? '已生成图片' : `消息 ${task.messageIndex + 1}`;
             taskList.append(
                 $('<div class="rpig-queued-task">').append(
-                    $('<span>').text(`${index + 1}. 消息 ${task.messageIndex + 1} · ${label}`),
+                    $('<span>').text(`${index + 1}. ${sourceLabel} · ${label}`),
                     $('<button type="button" class="rpig-cancel-queued" title="取消此排队任务">取消</button>').attr('data-task-id', task.id),
                 ),
             );
@@ -589,7 +900,7 @@ function cancelQueuedGeneration(taskId) {
     const [task] = rpigGenerationQueue.splice(index, 1);
     task.resolve({ cancelled: true, queued: true });
     updateGenerationQueueUI();
-    toastr.info(`已取消消息 ${task.messageIndex + 1} 的排队任务`);
+    toastr.info(task.kind === 'local-detail' ? '已取消局部精修的排队任务' : `已取消消息 ${task.messageIndex + 1} 的排队任务`);
 }
 
 function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excludedCharacters, refs, shotLabel, signal }) {
@@ -724,7 +1035,7 @@ async function processGenerationQueue() {
         rpigGenerating = true;
         updateGenerationQueueUI();
         try {
-            const result = await executeGenerationTask(task);
+            const result = task.kind === 'local-detail' ? await executeLocalDetailTask(task) : await executeGenerationTask(task);
             task.resolve(result);
             if (!result?.success && !result?.error && !result?.cancelled) {
                 setGenStatus('idle', '');
@@ -736,6 +1047,67 @@ async function processGenerationQueue() {
             rpigGenerating = false;
             updateGenerationQueueUI();
         }
+    }
+}
+
+function queueLocalDetailEdit(payload, settings, snapshot) {
+    throwIfAborted(payload.signal);
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const task = {
+            id: ++rpigTaskSequence, kind: 'local-detail', settings, payload, snapshot,
+            controller: new AbortController(),
+            resolve: value => {
+                if (settled) return;
+                settled = true;
+                payload.signal?.removeEventListener('abort', onAbort);
+                if (value?.cancelled) reject(createAbortError('已取消局部精修'));
+                else if (value?.error) reject(value.error);
+                else resolve(value.result);
+            },
+        };
+        const onAbort = () => {
+            task.controller.abort(payload.signal?.reason || createAbortError());
+            const index = rpigGenerationQueue.indexOf(task);
+            if (index >= 0) {
+                rpigGenerationQueue.splice(index, 1);
+                task.resolve({ cancelled: true });
+                updateGenerationQueueUI();
+            }
+        };
+        payload.signal?.addEventListener('abort', onAbort, { once: true });
+        rpigGenerationQueue.push(task);
+        updateGenerationQueueUI();
+        if (rpigActiveTask) toastr.info('局部精修已加入生成队列');
+        void processGenerationQueue();
+    });
+}
+
+async function executeLocalDetailTask(task) {
+    const signal = task.controller.signal;
+    const { settings, payload, snapshot } = task;
+    const requestId = `rpig_detail_${Date.now()}_${task.id}`;
+    const diagnostic = { requestId, mode: 'local-detail-edit', sourceUrl: snapshot.sourceUrl,
+        sourceSessionKey: snapshot.sessionKey, region: payload.region, status: 'running' };
+    const keys = [settings.backendKey, settings.llmKey, settings.finalLlmKey].filter(Boolean);
+    try {
+        throwIfAborted(signal);
+        setGenStatus('working', '正在局部精修…');
+        const result = await generateLocalDetailEdit(settings, payload.instruction, payload.patchDataUrl, {
+            patchSize: [256, 256], signal, requestId, diagnostics: diagnostic,
+        });
+        throwIfAborted(signal);
+        setGenStatus('done', '精修候选已生成，可预览后另存');
+        return { success: true, result: { ...result, diagnostics: sanitizeDiagnostics(diagnostic, keys) } };
+    } catch (error) {
+        diagnostic.status = isAbortError(error) ? 'cancelled' : 'failed';
+        diagnostic.error = scrubSensitiveText(error.message || String(error), keys);
+        if (isAbortError(error)) setGenStatus('idle', '');
+        else setGenStatus('error', diagnostic.error);
+        return { cancelled: isAbortError(error), error };
+    } finally {
+        diagnostic.finishedAt ||= new Date().toISOString();
+        persistGenerationDiagnostics(diagnostic, keys);
     }
 }
 
@@ -758,6 +1130,9 @@ async function executeGenerationTask(task) {
         const capturedMes = capturedMessage.mes;
         const capturedSwipeId = capturedMessage.swipe_id !== undefined ? capturedMessage.swipe_id : null;
         const capturedSendDate = capturedMessage.send_date || '';
+        const historySignature = chat => JSON.stringify(chat.slice(0, messageIndex).map(m =>
+            [m?.is_user, m?.is_system, m?.name, m?.swipe_id, storyFingerprint(m?.mes)]));
+        const capturedSourceHistory = historySignature(capturedChat);
 
         const isSessionStillValid = () => {
             const curContext = getContext();
@@ -765,6 +1140,7 @@ async function executeGenerationTask(task) {
             if (curContext.chat !== capturedChat) return false;
             const curMessage = curContext.chat[messageIndex];
             if (curMessage !== capturedMessage) return false;
+            if (historySignature(curContext.chat) !== capturedSourceHistory) return false;
             if (curMessage.mes !== capturedMes) return false;
             if ((curMessage.swipe_id !== undefined ? curMessage.swipe_id : null) !== capturedSwipeId) return false;
             if ((curMessage.send_date || '') !== capturedSendDate) return false;
@@ -791,6 +1167,10 @@ async function executeGenerationTask(task) {
         let retrySignature;
         let analysisSnapshot;
         let basePrompt = '';
+        const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+        const diagnosticKeys = [s.backendKey, s.llmKey, s.finalLlmKey];
+        const taskDiagnostics = { requestId, timestamp: new Date().toISOString(), status: 'running',
+            stage: 'start', referenceFailures: [], conflicts: [], references: [] };
 
         try {
             const shotMode = explicitShotMode || s.shotMode || 'snapshot';
@@ -799,20 +1179,30 @@ async function executeGenerationTask(task) {
 
             const windowSize = Math.max(2, parseInt(s.autoWindow, 10) || 12);
             const dialogueHistory = buildDialogueContext(capturedChat, messageIndex, windowSize);
-            const participantContext = buildParticipantContext(
+            const currentWorldAgeContext = await getCurrentWorldAgeContext(character, loadWorldInfo, { signal });
+            const participantContext = [buildParticipantContext(
                 context,
                 capturedChat,
                 messageIndex,
                 character,
                 s.characterAnchors || {},
-            );
+            ), currentWorldAgeContext].filter(Boolean).join('\n');
 
             retrySignature = imageRetrySignature({ sessionKey: capturedSessionKey, messageIndex,
-                message: capturedMessage, dialogueHistory, participantContext, character,
+                message: capturedMessage, sourceHistory: capturedSourceHistory, dialogueHistory, participantContext, character,
                 characterAnchor: getCharacterVisualAnchor(character, s.characterAnchors || {}),
                 previousGenerated, settings: s, shotMode, promptFormat, presetPrompt, presetAvoid, generationMeta });
             if (s.imageRetryMode === 'reanalyze') rpigImageRetryCache.delete(capturedMessage);
-            const cached = !presetPrompt && s.imageRetryMode !== 'reanalyze' ? rpigImageRetryCache.get(capturedMessage, retrySignature) : null;
+            const cached = s.imageRetryMode === 'reanalyze' ? null : rpigImageRetryCache.get(capturedMessage, retrySignature);
+            let structuredSceneState = cached?.sceneState || null;
+            let step1RawText = null;
+            let step1ParsedJson = null;
+            let step2RawText = null;
+            let step2ParsedJson = null;
+            let step3RawText = null;
+            let step3ParsedJson = null;
+            let preConfirmedPrompt = '';
+            let step3ExcludeList = Array.isArray(cached?.exclude) ? cached.exclude : [];
             if (cached) {
                 ({ prompt, basePrompt, avoid, directorDraft, omniscientDraft, visibleCharacters,
                     excludedCharacters, finalizerApplied, sceneAnchor, sceneChanged } = cached);
@@ -821,215 +1211,219 @@ async function executeGenerationTask(task) {
             } else {
             toastr.info(`🎬 开始构思并生成配图（${shotLabel}）…`, '', { timeOut: 3000 });
 
-            // 第一部分：沿用原有导演视角，锁定最新回合和焦点角色。
-            if (!directorDraft) {
-                setGenStatus('working', `①/⑤ 🧠 焦点镜头分析（${shotLabel}）…`);
-                const { system, userText } = buildDirectorPrompt({
-                    character,
-                    currentMessageText: capturedMes || '',
-                    dialogueHistory,
-                    shotMode,
-                    promptFormat,
-                    stylePreset: s.stylePreset || 'character',
-                    customAnchors: s.characterAnchors || {},
-                    continuityContext: previousGenerated?.prompt || '',
-                    hideHandsFeet: false,
-                });
-
-                if (!isSessionStillValid()) {
-                    toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
-                    return;
-                }
-                let raw = await callLLM(system, userText, s, getContext, { signal, jsonMode: true });
-                if (!isSessionStillValid()) {
-                    toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
-                    return;
-                }
-                let parsedDirector = parseDirectorLlmOutput(raw);
-                if (!parsedDirector.finalPrompt) {
-                    setGenStatus('working', '①/⑤ 🧠 焦点镜头格式校正并重试…');
-                    const repairSystem = `你是严格的 JSON 输出修复器。重新完成电影镜头分析，只输出一个合法 JSON 对象，不得输出 Markdown、解释或前后缀。JSON 必须包含 scene_changed、reason、style、shot、scene_anchor、final_prompt、avoid；final_prompt 必须是完整英文生图提示词且不能为空。`;
-                    const repairUser = `${userText}\n\n【上一次不合规返回，仅供纠错】：\n${stripHtml(String(raw || '')).slice(0, 2400)}`;
-                    raw = await callLLM(repairSystem, repairUser, s, getContext, { signal, jsonMode: true });
-                    if (!isSessionStillValid()) {
-                        toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
-                        return;
-                    }
-                    parsedDirector = parseDirectorLlmOutput(raw);
-                }
-                const json = parsedDirector.json;
-                directorDraft = parsedDirector.finalPrompt;
-                avoid = mergeNegativePrompts(avoid, (json.avoid || '').trim());
-                sceneAnchor = (json.scene_anchor || sceneAnchor || '').trim();
-                sceneChanged = json.scene_changed !== false;
-                if (!directorDraft) throw new Error('焦点镜头 LLM 连续两次未返回符合格式的 JSON 提示词');
-            }
-
-            // 第二部分：上帝视角核对所有在场人物及其空间、视线和互动关系。
-            if (s.omniscientMode !== false) {
-                setGenStatus('working', '②/⑤ 👁️ 上帝视角分析所有在场人物…');
-                try {
-                    const omniscientRequest = buildOmniscientPrompt({
-                        currentMessageText: capturedMes || '',
-                        dialogueHistory,
-                        participantContext,
-                        directorDraft,
-                        sceneAnchor,
-                        shotMode,
-                        stylePreset: s.stylePreset || 'character',
-                        hideHandsFeet: false,
-                    });
-                    const omniscientRaw = await callLLM(
-                        omniscientRequest.system,
-                        omniscientRequest.userText,
-                        s,
-                        getContext,
-                        { signal },
-                    );
-                    if (!isSessionStillValid()) {
-                        toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
-                        return;
-                    }
-                    const omniscientJson = extractJson(omniscientRaw) || {};
-                    omniscientDraft = String(omniscientJson.ensemble_prompt || omniscientJson.final_prompt || '').trim();
-                    const castContext = {
-                        context,
-                        chat: capturedChat,
-                        messageIndex,
-                        focalCharacter: character,
-                    };
-                    visibleCharacters = normalizeCastCharacters(omniscientJson.visible_characters, castContext);
-                    excludedCharacters = normalizeCastCharacters(omniscientJson.excluded_characters, {
-                        ...castContext,
-                        fallbackToFocal: false,
-                    }).filter(name => !visibleCharacters.includes(name));
-                    sceneAnchor = String(omniscientJson.scene_anchor || sceneAnchor || '').trim();
-                    avoid = mergeNegativePrompts(avoid, String(omniscientJson.avoid || '').trim());
-                } catch (error) {
-                    if (isAbortError(error)) throw error;
-                    const safeMessage = scrubSensitiveText(error?.message || String(error));
-                    console.warn('[RP 电影配图] 上帝视角分析失败，继续使用焦点镜头：', safeMessage);
-                    toastr.warning(`上帝视角分析失败，已保留焦点镜头继续总结：${escapeHtml(safeMessage)}`);
-                    visibleCharacters = normalizeCastCharacters([], {
-                        context,
-                        chat: capturedChat,
-                        messageIndex,
-                        focalCharacter: character,
-                    });
-                }
-            } else {
-                setGenStatus('working', '②/⑤ 👁️ 上帝视角已关闭，使用原有焦点镜头');
-            }
-
-            // 第三部分：总结 LLM 消除冲突，只输出一整段可直接送给生图模型的提示词。
-            setGenStatus('working', '③/⑤ ✍️ 总结 LLM 正在合成最终提示词…');
-            const finalizerRequest = buildFinalizerPrompt({
-                directorDraft,
-                omniscientDraft,
-                currentMessageText: capturedMes || '',
-                participantContext,
-                visibleCharacters,
-                excludedCharacters,
-                sceneAnchor,
-                continuityContext: previousGenerated?.prompt || '',
-                shotMode,
-                stylePreset: s.stylePreset || 'character',
-                hideHandsFeet: false,
+            // ① 剧情事实提取 LLM (结构化事实提取，不把旧提示词当状态，杜绝暗光循环污染)
+            setGenStatus('working', `①/⑤ 📜 提取剧情事实（${shotLabel}）…`);
+            const previousSceneState = getPreviousSceneState(capturedChat, messageIndex);
+            const effectivePreviousState = getEffectivePreviousState(previousSceneState);
+            const step1Prompt = buildStoryFactsPrompt({
+                latestStory: capturedMes || '',
+                currentState: effectivePreviousState,
+                historySummary: dialogueHistory,
+                identityIndex: { focal_character: character?.name || null, player: context?.name1 || null },
             });
-            try {
-                const finalizerRaw = await callLLM(
-                    finalizerRequest.system,
-                    finalizerRequest.userText,
-                    getFinalizerLlmSettings(s),
-                    getContext,
-                    { signal },
-                );
-                if (!isSessionStillValid()) {
-                    toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
-                    return;
-                }
-                prompt = normalizeFinalPromptOutput(finalizerRaw);
-                if (!prompt) throw new Error('总结 LLM 返回空内容或策略拦截信息');
-                finalizerApplied = true;
-            } catch (error) {
-                if (isAbortError(error)) throw error;
-                const safeMessage = scrubSensitiveText(error?.message || String(error));
-                console.warn('[RP 电影配图] 总结 LLM 失败，使用两份分析的安全合并结果：', safeMessage);
-                toastr.warning(`总结 LLM 失败，已自动合并两份分析继续生成：${escapeHtml(safeMessage)}`);
-                prompt = collapsePromptToSingleParagraph([directorDraft, omniscientDraft].filter(Boolean).join(' '));
+            if (currentWorldAgeContext) step1Prompt.system += '\n\n' + currentWorldAgeContext;
+            const onLocalFallback = stage => ({reason}) => {
+                taskDiagnostics.localFallbackStages ||= [];
+                taskDiagnostics.localFallbackStages.push({stage,reason});
+                setGenStatus('working', stage + '/⑤ 云端未完成，本地正在补充当前阶段…');
+                toastr.info('当前阶段已自动切换到本地模型；完成后继续优先云端');
+            };
+            taskDiagnostics.stage = 'facts';
+            let step1Raw = await callLLM(step1Prompt.system, step1Prompt.userText, s, getContext, { signal, jsonMode: true, onFallback: onLocalFallback(1), validateResponse: raw => parseAnalysisResponse(raw, 1, { latestStory: capturedMes || '', previousState: effectivePreviousState }) });
+            if (!isSessionStillValid()) {
+                toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
+                return;
+            }
+            taskDiagnostics.step1Raw = step1Raw;
+            let sceneFacts = parseAnalysisResponse(step1Raw, 1, { latestStory: capturedMes || '', previousState: effectivePreviousState,
+                onNormalization: notes => { taskDiagnostics.step1Normalization = notes; } });
+
+            step1RawText = step1Raw;
+            taskDiagnostics.step1Raw = step1Raw;
+            step1ParsedJson = sceneFacts;
+            taskDiagnostics.step1Parsed = sceneFacts;
+            structuredSceneState = buildVersionedSceneState(
+                sceneFacts, // Passing the full sceneFacts so it can access narrative_end_state and moment_evidence
+                effectivePreviousState,
+                messageIndex,
+                capturedMes || '',
+                sceneFacts.actions,
+                sceneFacts.explicit_changes
+            );
+            // Raw extraction remains in diagnostics only; downstream sees verified environment.
+            sceneFacts = getIllustrationFacts(sceneFacts, structuredSceneState);
+            // Automatic detection is only a trigger; its draft must not supply a different frame or environment.
+            sceneAnchor = '';
+            sceneChanged = structuredSceneState.scene_continues !== true;
+            directorDraft = sceneFacts.moment || JSON.stringify(sceneFacts);
+
+            // ② 人物与空间关系检查 LLM (核对在场角色、空间关系与肢体归属，杜绝肢体冲突)
+            setGenStatus('working', '②/⑤ 👥 核对人物与空间关系…');
+            const castContext = {
+                context,
+                chat: capturedChat,
+                messageIndex,
+                focalCharacter: character,
+            };
+            const characterNames = character ? (character.name || 'character') : 'character';
+            const userName = String(context?.name1 || [...capturedChat].reverse().find(message => message?.is_user)?.name || 'User protagonist').trim();
+            const knownCharacters = `${characterNames}, ${userName}`;
+
+            const step2Prompt = buildRelationCheckerPrompt({
+                latestStory: capturedMes || '',
+                latestUserInstruction: capturedChat[messageIndex - 1]?.is_user ? capturedChat[messageIndex - 1].mes : '',
+                sceneFacts: sceneFacts,
+                characterNamesAndAliases: knownCharacters,
+                characterDesignContext: participantContext,
+            });
+            taskDiagnostics.stage = 'relations';
+            let step2Raw = await callLLM(step2Prompt.system, step2Prompt.userText, s, getContext, { signal, jsonMode: true, onFallback: onLocalFallback(2), validateResponse: raw => parseAnalysisResponse(raw, 2, { latestStory: capturedMes || '', momentEvidence: sceneFacts.moment_evidence, sceneFacts }) });
+            if (!isSessionStillValid()) {
+                toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
+                return;
+            }
+            taskDiagnostics.step2Raw = step2Raw;
+            let relationFacts = parseAnalysisResponse(step2Raw, 2, { latestStory: capturedMes || '', momentEvidence: sceneFacts.moment_evidence, sceneFacts,
+                onNormalization: notes => { taskDiagnostics.step2Normalization = notes; } });
+
+            step2RawText = step2Raw;
+            taskDiagnostics.step2Raw = step2Raw;
+            step2ParsedJson = relationFacts;
+            taskDiagnostics.step2Parsed = relationFacts;
+            omniscientDraft = JSON.stringify(relationFacts.spatial_relations || []);
+            visibleCharacters = normalizeCastCharacters(relationFacts.visible_characters, { ...castContext, fallbackToFocal: false });
+            if (!visibleCharacters.length) throw new RpigError('ANALYSIS_EMPTY_CAST', '规范化后没有有效入镜人物，已停止生图');
+            excludedCharacters = normalizeCastCharacters(relationFacts.mentioned_only_characters, {
+                ...castContext,
+                fallbackToFocal: false,
+            }).filter(name => !visibleCharacters.includes(name));
+
+            // ③ 图像编辑指令 LLM (依据事实与人物关系，编写 1-4 句自然语言英文编辑指令)
+            setGenStatus('working', '③/⑤ ✍️ 编写图像编辑指令…');
+            const step3Prompt = buildEditInstructionPrompt({
+                latestStory: capturedMes || '',
+                latestUserInstruction: capturedChat[messageIndex - 1]?.is_user ? capturedChat[messageIndex - 1].mes : '',
+                sceneFacts: sceneFacts,
+                structuredSceneState: structuredSceneState,
+                castAndSpatialFacts: relationFacts,
+                explicitChanges: sceneFacts.explicit_changes || {},
+                shotMode,
+                characterDesignContext: participantContext,
+            });
+            taskDiagnostics.stage = 'instruction';
+            let step3Raw = await callLLM(step3Prompt.system, step3Prompt.userText, getFinalizerLlmSettings(s), getContext, { signal, jsonMode: true, onFallback: onLocalFallback(3), validateResponse: raw => parseAnalysisResponse(raw, 3, { latestStory: capturedMes || '', expectedCharacterNames: visibleCharacters }) });
+            if (!isSessionStillValid()) {
+                toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
+                return;
+            }
+            taskDiagnostics.step3Raw = step3Raw;
+            let editJson = parseAnalysisResponse(step3Raw, 3, { latestStory: capturedMes || '', expectedCharacterNames: visibleCharacters,
+                onNormalization: notes => { taskDiagnostics.step3Normalization = notes; } });
+            step3RawText = step3Raw;
+            taskDiagnostics.step3Raw = step3Raw;
+            step3ParsedJson = editJson;
+            taskDiagnostics.step3Parsed = editJson;
+            let editInstruction = '';
+            let preserve = '';
+
+            if (editJson && typeof editJson === 'object' && editJson.edit_instruction) {
+                const composedEdit = composeStoryEdit(editJson, relationFacts, {sceneState:structuredSceneState,sceneFacts,latestStory:capturedMes});
+                editInstruction = composedEdit.editInstruction;
+                preserve = composedEdit.preserve;
+                step3ExcludeList = composedEdit.exclude;
+                taskDiagnostics.thoughtBubbleApplied = composedEdit.thoughtBubbleApplied;
+                taskDiagnostics.psychologicalReactions = composedEdit.psychologicalReactions;
+                taskDiagnostics.appearanceChanges = composedEdit.appearanceChanges;
+            } else {
+                throw new RpigError('ANALYSIS_INVALID_SCHEMA', '第三步缺少英文编辑指令，已停止生图');
             }
 
-            if (s.omniscientMode !== false) {
-                prompt = enforceOmniscientEnsemble(prompt, visibleCharacters, excludedCharacters);
-            }
+            // ④ 插件添加统一画风与身份规则 (单次组装，画风只添加一次，桥接不再改写)
+            prompt = assembleUnifiedPrompt({
+                editInstruction,
+                preserve,
+                exclude: step3ExcludeList,
+                shotMode,
+            });
+            avoid = mergeNegativePrompts(DEFAULT_SD_NEGATIVE, s.sdNegative, ...step3ExcludeList);
 
+            finalizerApplied = true;
             basePrompt = prompt;
+            preConfirmedPrompt = prompt;
             }
             analysisSnapshot = { ...cached, prompt, basePrompt, avoid, directorDraft, omniscientDraft,
-                visibleCharacters, excludedCharacters, finalizerApplied, sceneAnchor, sceneChanged };
+                visibleCharacters, excludedCharacters, finalizerApplied, sceneAnchor, sceneChanged,
+                sceneState: structuredSceneState, exclude: step3ExcludeList,
+                castAliases: step2ParsedJson?.aliases || cached?.castAliases || {} };
             const refs = [];
             const pushUniqueRef = (ref) => {
                 if (!(ref?.url || ref?.dataUrl)) return;
+                // 同一身份内的重复引用直接跳过；不同身份保留，供读取阶段进行冲突检查与警告
                 if (refs.some(existing =>
-                    (ref.url && existing.url === ref.url) ||
-                    (ref.dataUrl && existing.dataUrl === ref.dataUrl))) return;
+                    existing.identityId === ref.identityId &&
+                    ((ref.url && existing.url === ref.url) ||
+                     (ref.dataUrl && existing.dataUrl === ref.dataUrl)))) return;
                 refs.push(ref);
             };
 
             const userName = String(context?.name1 || [...capturedChat].reverse().find(message => message?.is_user)?.name || 'User protagonist').trim();
-            const normalizedVisibleNames = new Set((visibleCharacters || []).map(name => String(name || '').trim().toLowerCase()).filter(Boolean));
-            const userIsVisible = normalizedVisibleNames.has(userName.toLowerCase());
             const characterName = String(character?.name || '').trim();
-            const characterIsVisible = !normalizedVisibleNames.size || (characterName && normalizedVisibleNames.has(characterName.toLowerCase()));
-            let avatarData = '';
-            const charRefs = character && characterIsVisible ? await getCharacterRefs(character) : [];
-            const userRefs = userIsVisible ? await getCharacterRefs('user') : [];
-            if (s.useCharacterImage !== false && character && characterIsVisible && !(s.stylePreset === 'reference' && charRefs.length)) {
-                avatarData = await getCharacterAvatarDataUrl(character) || '';
+            const castReferencePlan = resolveCastReferencePlan(visibleCharacters, {
+                characters:getAllCharacters(), focalCharacter:character, userName,
+                aliases:analysisSnapshot.castAliases, messageName:capturedMessage.name || '',
+            });
+            taskDiagnostics.castReferenceMatches = castReferencePlan.map(p=>({actorName:p.actorName,kind:p.kind,
+                cardName:p.character?.name || null,cardAvatar:p.character?.avatar || null,matchedBy:p.matchedBy}));
+            const focalMatch=castReferencePlan.find(p=>p.kind==='character' && getCharacterIdentifier(p.character)===getCharacterIdentifier(character));
+            const userMatch=castReferencePlan.find(p=>p.kind==='user');
+            const userIsVisible=!!userMatch;
+
+            // 按照三级优先级明确解析角色与 User 的主身份与辅助参考图
+            taskDiagnostics.stage = 'references';
+            const charRefResolved = await resolveCharacterReferences(character, focalMatch?.actorName || characterName, !!focalMatch);
+            const userRefResolved = await resolveUserReferences(userMatch?.actorName || userName, userIsVisible);
+            if (userIsVisible && !userRefResolved.primaryRef && s.stylePreset === 'reference') {
+                throw new RpigError('USER_REFERENCE_REQUIRED', `${userName} 本次入镜，但没有玩家身份图；请上传 User 参考图，或确认玩家本次在画外`);
             }
-            if (avatarData) {
-                pushUniqueRef({
-                    dataUrl: avatarData,
-                    label: '角色卡原图 · 第一优先级身份锚点',
-                    kind: 'identity-primary',
-                    identityId: `character:${getCharacterIdentifier(character)}`,
-                    identityName: characterName || '当前角色',
-                });
-            } else if (charRefs.length) {
-                const firstSavedRef = charRefs[0];
-                pushUniqueRef({
-                    ...firstSavedRef,
-                    label: `${firstSavedRef.label || '角色参考图'} · 第一优先级身份与画风锚点`,
-                    kind: 'identity-primary',
-                    identityId: `character:${getCharacterIdentifier(character)}`,
-                    identityName: characterName || '当前角色',
-                });
+            let primarySourceUsed = charRefResolved.primarySource || userRefResolved.primarySource || 'none';
+
+            if (charRefResolved.primaryRef) {
+                pushUniqueRef(charRefResolved.primaryRef);
+            }
+            if (userRefResolved.primaryRef) {
+                pushUniqueRef(userRefResolved.primaryRef);
+            }
+            for (const sRef of charRefResolved.supportingRefs) {
+                pushUniqueRef(sRef);
+            }
+            for (const sRef of userRefResolved.supportingRefs) {
+                pushUniqueRef(sRef);
             }
 
-            for (const [index, ref] of userRefs.entries()) {
-                pushUniqueRef({
-                    ...ref,
-                    label: `${ref.label || 'User 参考图'} · ${userName}`,
-                    kind: refs.some(item => item.kind === 'identity-primary') || index > 0 ? 'identity-secondary' : 'identity-primary',
-                    identityId: 'user',
-                    identityName: userName,
-                });
+            for (const match of castReferencePlan) {
+                if (match===focalMatch || match.kind==='user') continue;
+                const name=match.actorName;
+                if (match.kind==='unmatched' && s.stylePreset === 'reference') throw new RpigError('CAST_REFERENCE_REQUIRED', `入镜人物「${name}」尚未匹配到角色卡或专属参考图，请在角色图库绑定该人物的参考图`);
+                if (match.character) {
+                    const resolved = await resolveCharacterReferences(match.character, name, true);
+                    if (!resolved.primaryRef && s.stylePreset === 'reference') throw new RpigError('CAST_REFERENCE_REQUIRED', `入镜人物「${name}」的主身份图不可用`);
+                    if (resolved.primaryRef) pushUniqueRef(resolved.primaryRef);
+                    resolved.supportingRefs.forEach(pushUniqueRef);
+                }
+            }
+            if (!cached?.confirmedPrompt) {
+                const bubbleException = hasRequestedThoughtBubble(prompt) ? ' The requested same-person avatar inside the thought bubble is symbolic, not another physical cast member.' : '';
+                prompt += `\nVISIBLE CAST (${visibleCharacters.length}): ${visibleCharacters.join(', ') || 'none'}. Each listed person has one physical body in the main scene, within their specified visible range.${bubbleException} References do not add people.`;
             }
 
-            if (previousGenerated?.url) {
+            const continuityReferenceAllowed = s.usePreviousImage !== false
+                && canUseContinuityReference(previousGenerated, capturedChat, structuredSceneState);
+            if (continuityReferenceAllowed) {
                 pushUniqueRef({
-                    url: previousGenerated.url,
-                    label: '上一张剧情图 · 仅用于服装与镜头连续性',
+                    url: previousGenerated?.url,
+                    label: '上一张剧情图 · 仅用于未变服装与道具',
                     kind: 'continuity',
-                });
-            }
-
-            for (const r of charRefs) {
-                pushUniqueRef({
-                    ...r,
-                    kind: r.kind || 'identity-secondary',
-                    identityId: `character:${getCharacterIdentifier(character)}`,
-                    identityName: characterName || '当前角色',
+                    role: 'continuity',
                 });
             }
 
@@ -1037,11 +1431,11 @@ async function executeGenerationTask(task) {
                 basePrompt: prompt,
                 sceneAnchor,
                 hasIdentityReference: refs.some(r => r.kind === 'identity-primary'),
-                hasContinuityReference: !!previousGenerated?.url,
+                hasContinuityReference: refs.some(r => r.kind === 'continuity'),
                 promptFormat,
             }));
             if (cached?.confirmedPrompt) avoid = cached.confirmedAvoid;
-            const sameMessageReference = previousGenerated?.sourceType === 'same_message';
+            const sameMessageReference = continuityReferenceAllowed && previousGenerated?.sourceType === 'same_message';
 
             throwIfAborted(signal);
             if (s.previewBeforeGeneration !== false && generationMeta.automatic !== true && !cached?.confirmedPrompt) {
@@ -1060,6 +1454,7 @@ async function executeGenerationTask(task) {
                     rpigImageRetryCache.delete(capturedMessage);
                     setGenStatus('idle', '');
                     toastr.info('已取消本次生成，未请求图片后端');
+                    taskDiagnostics.status = 'cancelled';
                     return { cancelled: true, beforeBackend: true };
                 }
                 prompt = review.prompt;
@@ -1069,21 +1464,56 @@ async function executeGenerationTask(task) {
             analysisSnapshot.confirmedPrompt = prompt;
             analysisSnapshot.confirmedAvoid = avoid;
 
+            // 负向词已在第三步及用户确认阶段统一合并进 avoid，避免重复合并与未声明变量引用
+            const mergedNegative = avoid;
+
+            Object.assign(taskDiagnostics, {
+                requestId,
+                timestamp: new Date().toISOString(),
+                primarySource: primarySourceUsed,
+                step1Raw: step1RawText,
+                step1Parsed: step1ParsedJson,
+                step2Raw: step2RawText,
+                step2Parsed: step2ParsedJson,
+                step3Raw: step3RawText,
+                step3Parsed: step3ParsedJson,
+                assembledPrompt: preConfirmedPrompt || basePrompt || prompt,
+                confirmedPrompt: prompt,
+                negativePrompt: mergedNegative,
+                requestedResolution: s.qwenResolution || '512x288',
+                seedConfig: s.qwenSeed !== undefined && s.qwenSeed !== '' && Number(s.qwenSeed) >= 0 ? Number(s.qwenSeed) : 'random',
+                referenceFailures: [],
+                conflicts: [],
+                referenceCount: refs.length,
+                references: refs.map(r => ({
+                    referenceIndex: r.referenceIndex,
+                    role: r.role || r.kind,
+                    source: r.source,
+                    identityId: r.identityId,
+                    identityName: r.identityName,
+                    label: r.label,
+                })),
+            });
+
+            taskDiagnostics.stage = 'image-request';
             setGenStatus('working', `④/⑤ 🖼 后端渲染中（${shotLabel}）…`);
             result = await generateImage(s, prompt, avoid, refs, {
                 fetchToDataUrl,
                 onWarning: (msg) => toastr.warning(escapeHtml(msg), '', { timeOut: 6000 }),
                 slashCommandParser: SlashCommandParser,
-                continuityReference: !!previousGenerated,
+                continuityReference: continuityReferenceAllowed,
                 sceneChanged: sameMessageReference ? false : sceneChanged !== false,
-                denoisingStrength: previousGenerated
+                denoisingStrength: continuityReferenceAllowed
                     ? Math.min(0.85, Math.max(0.2, Number(s.continuityDenoising) || 0.48))
                     : undefined,
                 signal,
+                negativePrompt: mergedNegative,
+                requestId: requestId,
+                diagnostics: taskDiagnostics,
             });
             rpigImageRetryCache.delete(capturedMessage);
 
-            if (previousGenerated && result.usedRefs === false) {
+            if (continuityReferenceAllowed && result.usedRefs === false) {
                 toastr.warning('⚠️ 当前后端未实际使用上一张参考图，本次仅靠文字维持造型；建议检查 /images/edits 或图生图配置', '', { timeOut: 9000 });
             }
 
@@ -1092,6 +1522,7 @@ async function executeGenerationTask(task) {
                 return;
             }
 
+            taskDiagnostics.stage = 'persist-image';
             setGenStatus('working', '⑤/⑤ 💾 正在持久化并挂载…');
             throwIfAborted(signal);
             const rawImageData = result.dataUrl || result.imageUrl;
@@ -1134,10 +1565,14 @@ async function executeGenerationTask(task) {
                 backend: s.backend,
                 model: result.model,
                 time: Date.now(),
-                continuitySourceIndex: previousGenerated?.messageIndex ?? null,
-                continuitySourceType: previousGenerated?.sourceType || null,
+                continuitySourceIndex: continuityReferenceAllowed ? previousGenerated.messageIndex : null,
+                continuitySourceType: continuityReferenceAllowed ? previousGenerated.sourceType : null,
                 referenceApplied: result.usedRefs === true,
+                requestId: requestId,
+                primarySource: primarySourceUsed,
+                sceneState: structuredSceneState,
                 sceneAnchor,
+                diagnostics: sanitizeDiagnostics(taskDiagnostics, diagnosticKeys),
                 sceneChanged: sceneChanged !== false,
                 directorDraft,
                 omniscientDraft,
@@ -1181,8 +1616,13 @@ async function executeGenerationTask(task) {
 
             setGenStatus('done', `${shotLabel}已生成并挂载！`);
             toastr.success(`✨ ${shotLabel}生成成功并已挂载到聊天！`, '', { timeOut: 4000 });
+            taskDiagnostics.status = 'success';
+            taskDiagnostics.stage = 'complete';
             return { success: true, url: persistedUrl };
         } catch (error) {
+            taskDiagnostics.status = isAbortError(error) ? 'cancelled' : 'failed';
+            taskDiagnostics.error = scrubSensitiveText(error.message || String(error), diagnosticKeys);
+            taskDiagnostics.errorCode = error.code || null;
             if (isAbortError(error)) {
                 rpigImageRetryCache.delete(capturedMessage);
                 setGenStatus('idle', '');
@@ -1197,6 +1637,19 @@ async function executeGenerationTask(task) {
             setGenStatus('error', safeErrMsg);
             toastr.error(`❌ 生成失败：${safeErrMsg}`, '', { timeOut: 12000, escapeHtml: true });
             return { error };
+        } finally {
+            if (taskDiagnostics.status === 'running') taskDiagnostics.status = 'cancelled';
+            taskDiagnostics.finishedAt = new Date().toISOString();
+            const diagnostic = persistGenerationDiagnostics(taskDiagnostics, diagnosticKeys);
+            if (isSessionStillValid()) {
+                capturedMessage.extra ||= {};
+                capturedMessage.extra.rpigLastAttempt = diagnostic;
+                if (capturedMessage.extra.rpigInfo?.requestId === requestId) {
+                    capturedMessage.extra.rpigInfo.diagnostics = diagnostic;
+                }
+                try { await context.saveChat?.(); }
+                catch (err) { console.warn('[RP-Diag] 会话诊断保存失败，本机诊断仍可用', scrubSensitiveText(err.message, diagnosticKeys)); }
+            }
         }
 }
 
@@ -1534,7 +1987,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.29</span>
+            <span class="rpig-header-version">v2.9.57</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -1544,7 +1997,8 @@ function buildSettingsUI() {
     container.append(header);
 
     const updateStatusPill = () => {
-        const backendName = s.backend === BACKENDS.OPENAI ? 'OpenAI 兼容'
+        const backendName = isLocalQwen(s) ? '本地千问'
+            : s.backend === BACKENDS.OPENAI ? 'OpenAI 兼容'
             : s.backend === BACKENDS.GEMINI ? 'Gemini'
             : s.backend === BACKENDS.SD ? 'Stable Diffusion'
             : s.backend === BACKENDS.COMFYUI ? 'ComfyUI'
@@ -1665,12 +2119,62 @@ function buildSettingsUI() {
     const sdStepsRow = row('SD 步数 (Steps)', sdStepsInput);
     const sdCfgRow = row('SD CFG 引导系数', sdCfgInput);
     const sdNegRow = row('SD 负面词', sdNegInput);
+
+    // Qwen 本地桥接参数配置
+    const qwenResSelect = $('<select>')
+        .append($('<option value="512x288">512轻量档（横屏512×288，随画幅适配）</option>'))
+        .append($('<option value="768x432">标准档（横屏 768×448，随画幅适配）</option>'))
+        .append($('<option value="1024x576">1024×576 (16:9 对照档)</option>'))
+        .val(s.qwenResolution || '512x288');
+    const qwenResRow = row('Qwen 直接绘制分辨率', qwenResSelect, '关闭清晰绘制时使用此档位。默认512轻量档；超宽画幅直接绘制为512×256。清晰绘制会自动选择内部尺寸，最终保持所选画幅、长边512。');
+
+    const qwenSeedInput = $('<input type="number" step="1" placeholder="留空或 -1 为随机 Seed">')
+        .val(s.qwenSeed !== undefined && s.qwenSeed !== '' && Number(s.qwenSeed) >= 0 ? s.qwenSeed : '');
+    const qwenSeedRow = row('Qwen 固定 Seed', qwenSeedInput, '设置固定数值可精准复现生图；留空或 -1 为真随机');
+
+    const qwenStepsInput = $('<input id="rpig-qwen-steps" aria-label="Qwen 步数" type="number" min="12" max="25" step="1">').val(qwenSteps(s.qwenSteps));
+    const qwenStepsRow = row('Qwen 步数（12–25）', qwenStepsInput, '默认 20；本机低于 20 步出现模糊和色块，可在 12–25 内调整。');
+    const qwenCfgInput = $('<input id="rpig-qwen-cfg" aria-label="Qwen CFG" type="number" min="1" max="10" step="0.5">').val(s.qwenCfg || 1);
+    const qwenCfgRow = row('Qwen CFG', qwenCfgInput, '千问 2.1 参考预设为 1；CFG 1 时负面词不参与采样，需要负面约束可提高 CFG。');
+    const qwenProfileSelect = $('<select aria-label="Qwen 参考图处理">')
+        .append('<option value="balanced">均衡：完整参考图，约 512² 像素/图</option><option value="detail">细节：约 768² 像素/图，耗时更长</option>')
+        .val(s.qwenReferenceProfile || 'balanced');
+    const qwenProfileRow = row('Qwen 参考图处理', qwenProfileSelect, '保持完整图像和长宽比；只影响本次输入的处理尺寸，原始上传图保留。');
+    const qwenReferencePolicySelect = $('<select aria-label="Qwen 参考图发送">').append('<option value="story">剧情优先：各人物主身份图与脸部特写</option><option value="all">全部启用图：保留辅助设计图，耗时更多</option>').val(s.qwenReferencePolicy || 'story');
+    const qwenReferencePolicyRow = row('Qwen 参考图发送', qwenReferencePolicySelect, '剧情优先减少旧服装与三视图的干扰，每个入镜人物保留自己的身份图；全部模式发送所有启用参考图。');
+    qwenReferencePolicySelect.on('change', () => { s.qwenReferencePolicy = qwenReferencePolicySelect.val(); saveSettingsDebounced(); });
+    const qwenIdentityDetailInput = $('<input type="checkbox" aria-label="人物细节优先">').prop('checked', s.qwenIdentityDetailBoost === true).prop('disabled', s.qwenResolution === '512x288');
+    const qwenIdentityDetailRow = row('人物细节优先', qwenIdentityDetailInput, '512轻量档禁用自动升档。其他档默认关闭；开启会使用高档输出和细节参考处理，最多20步，多图可能需要数分钟。');
+    qwenIdentityDetailInput.on('change', () => { s.qwenIdentityDetailBoost = qwenIdentityDetailInput.prop('checked'); saveSettingsDebounced(); });
+    const qwenSceneDetailInput = $('<input type="checkbox" aria-label="清晰绘制，最终512">').prop('checked',s.qwenSceneDetail === true);
+    const qwenSceneDetailRow = row('清晰绘制，最终512',qwenSceneDetailInput,'原图参考模式下，普通剧情整张高分辨率绘制一次，再缩为当前画幅、长边512；保留步数与CFG，多人图需要数分钟。镜面与倒影场景沿用原绘制档。');
+    qwenSceneDetailInput.on('change',()=>{s.qwenSceneDetail=qwenSceneDetailInput.prop('checked');updateBackendVisibility();saveSettingsDebounced();});
+    const qwenCacheSelect = $('<select aria-label="Qwen 参考缓存">')
+        .append('<option value="q8_0">8 位：保留更多参考细节</option><option value="q4_0">4 位：显存不足时使用</option>')
+        .val(s.qwenCacheType || 'q8_0');
+    const qwenCacheRow = row('Qwen 参考缓存', qwenCacheSelect);
+    qwenStepsInput.on('input change', () => { s.qwenSteps = qwenSteps(qwenStepsInput.val()); saveSettingsDebounced(); });
+    qwenCfgInput.on('input change', () => { s.qwenCfg = Math.max(1, Math.min(10, Number(qwenCfgInput.val()) || 1)); saveSettingsDebounced(); });
+    qwenProfileSelect.on('change', () => { s.qwenReferenceProfile = qwenProfileSelect.val(); saveSettingsDebounced(); });
+    qwenCacheSelect.on('change', () => { s.qwenCacheType = qwenCacheSelect.val(); saveSettingsDebounced(); });
+
+    qwenResSelect.on('change', () => {
+        s.qwenResolution = qwenResSelect.val();
+        if (s.qwenResolution === '512x288') { s.qwenIdentityDetailBoost = false; qwenIdentityDetailInput.prop('checked', false); }
+        updateBackendVisibility();
+        saveSettingsDebounced();
+    });
+    qwenSeedInput.on('input', () => {
+        const val = qwenSeedInput.val().trim();
+        s.qwenSeed = (val !== '' && !isNaN(Number(val)) && Number(val) >= 0) ? Number(val) : -1;
+        saveSettingsDebounced();
+    });
     const comfyWorkflowRow = row('Workflow JSON', comfyWorkflowInput, '在 ComfyUI 中点击「Save (API Format)」导出的 JSON');
     const comfyPosRow = row('正向节点 ID', comfyPosNodeInput);
     const comfyNegRow = row('负向节点 ID', comfyNegNodeInput);
     const comfyImgRow = row('参考图节点 ID', comfyImgNodeInput);
 
-    advancedDrawer.append(sdStepsRow, sdCfgRow, sdNegRow, comfyWorkflowRow, comfyPosRow, comfyNegRow, comfyImgRow);
+    advancedDrawer.append(qwenSceneDetailRow, qwenIdentityDetailRow, qwenStepsRow, qwenCfgRow, qwenReferencePolicyRow, qwenProfileRow, qwenCacheRow, qwenResRow, qwenSeedRow, sdStepsRow, sdCfgRow, sdNegRow, comfyWorkflowRow, comfyPosRow, comfyImgRow);
 
     function updateBackendVisibility() {
         const cur = backendSelect.val();
@@ -1684,7 +2188,13 @@ function buildSettingsUI() {
         comfyPosRow.toggle(cur === BACKENDS.COMFYUI);
         comfyNegRow.toggle(cur === BACKENDS.COMFYUI);
         comfyImgRow.toggle(cur === BACKENDS.COMFYUI);
-        const hasAdvanced = cur === BACKENDS.SD || cur === BACKENDS.COMFYUI;
+        const localQwen = isLocalQwen(s);
+        const sceneDetail = localQwen && s.stylePreset === 'reference' && s.qwenSceneDetail === true;
+        qwenResSelect.prop('disabled',sceneDetail);
+        qwenProfileSelect.prop('disabled',sceneDetail);
+        qwenIdentityDetailInput.prop('disabled',sceneDetail || s.qwenResolution === '512x288');
+        [qwenSceneDetailRow, qwenIdentityDetailRow, qwenStepsRow, qwenCfgRow, qwenReferencePolicyRow, qwenProfileRow, qwenCacheRow, qwenResRow, qwenSeedRow].forEach(element => element.toggle(localQwen));
+        const hasAdvanced = localQwen || cur === BACKENDS.SD || cur === BACKENDS.COMFYUI;
         advancedToggle.toggle(hasAdvanced);
         advancedDrawer.toggle(hasAdvanced);
     }
@@ -1696,9 +2206,9 @@ function buildSettingsUI() {
         updateStatusPill();
     });
 
-    urlInput.on('input', () => { s.backendUrl = urlInput.val(); saveSettingsDebounced(); });
+    urlInput.on('input', () => { s.backendUrl = urlInput.val(); updateBackendVisibility(); saveSettingsDebounced(); });
     keyInput.on('input', () => { s.backendKey = keyInput.val(); saveSettingsDebounced(); });
-    modelInput.on('input', () => { s.backendModel = modelInput.val(); saveSettingsDebounced(); updateStatusPill(); });
+    modelInput.on('input', () => { s.backendModel = modelInput.val(); updateBackendVisibility(); saveSettingsDebounced(); updateStatusPill(); });
     sdStepsInput.on('input', () => { s.sdSteps = parseInt(sdStepsInput.val(), 10) || 28; saveSettingsDebounced(); });
     sdCfgInput.on('input', () => { s.sdCfg = parseFloat(sdCfgInput.val()) || 7; saveSettingsDebounced(); });
     sdNegInput.on('input', () => { s.sdNegative = sdNegInput.val(); saveSettingsDebounced(); });
@@ -1707,7 +2217,7 @@ function buildSettingsUI() {
     comfyNegNodeInput.on('input', () => { s.comfyNegativeNodeId = comfyNegNodeInput.val().trim(); saveSettingsDebounced(); });
     comfyImgNodeInput.on('input', () => { s.comfyImageNodeId = comfyImgNodeInput.val().trim(); saveSettingsDebounced(); });
     promptFormatSelect.on('change', () => { s.promptFormat = promptFormatSelect.val(); saveSettingsDebounced(); });
-    styleSelect.on('change', () => { s.stylePreset = styleSelect.val(); saveSettingsDebounced(); if (typeof window.rpigRefreshFloatingStatus === 'function') window.rpigRefreshFloatingStatus(); });
+    styleSelect.on('change', () => { s.stylePreset = styleSelect.val(); updateBackendVisibility(); saveSettingsDebounced(); if (typeof window.rpigRefreshFloatingStatus === 'function') window.rpigRefreshFloatingStatus(); });
     sizeSelect.on('change', () => { s.imageSize = sizeSelect.val(); saveSettingsDebounced(); if (typeof window.rpigRefreshFloatingStatus === 'function') window.rpigRefreshFloatingStatus(); });
 
     card1.body.append(row('生图后端类型', backendSelect));
@@ -1776,6 +2286,25 @@ function buildSettingsUI() {
     card2.body.append(customLlmUrlRow);
     card2.body.append(customLlmKeyRow);
     card2.body.append(customLlmModelRow);
+    const fallbackCheck = $('<input type="checkbox">').prop('checked', s.llmFallbackEnabled === true);
+    const fallbackUrlInput = $('<input type="text">').val(s.llmFallbackUrl || 'http://127.0.0.1:11436/v1');
+    const fallbackModelInput = $('<input type="text">').val(s.llmFallbackModel || 'rp-scene-qwen35-9b');
+    const primaryWaitInput = $('<input type="number" min="10" max="180">').val(s.llmPrimaryTimeoutSeconds || 60);
+    const localWaitInput = $('<input type="number" min="30" max="600">').val(s.llmFallbackTimeoutSeconds || 180);
+    const fallbackDetails = $('<div>');
+    fallbackDetails.append(row('本地回退地址', fallbackUrlInput));
+    fallbackDetails.append(row('本地回退模型', fallbackModelInput));
+    fallbackDetails.append(row('云端等待上限（秒）', primaryWaitInput));
+    fallbackDetails.append(row('本地等待上限（秒）', localWaitInput));
+    fallbackDetails.toggle(s.llmFallbackEnabled === true);
+    fallbackCheck.on('change', () => { s.llmFallbackEnabled = fallbackCheck.prop('checked'); fallbackDetails.toggle(s.llmFallbackEnabled); saveSettingsDebounced(); });
+    fallbackUrlInput.on('input', () => { s.llmFallbackUrl = fallbackUrlInput.val().trim(); saveSettingsDebounced(); });
+    fallbackModelInput.on('input', () => { s.llmFallbackModel = fallbackModelInput.val().trim(); saveSettingsDebounced(); });
+    primaryWaitInput.on('input', () => { s.llmPrimaryTimeoutSeconds = Math.max(10, Math.min(180, Number(primaryWaitInput.val()) || 60)); saveSettingsDebounced(); });
+    localWaitInput.on('input', () => { s.llmFallbackTimeoutSeconds = Math.max(30, Math.min(600, Number(localWaitInput.val()) || 180)); saveSettingsDebounced(); });
+    card2.body.append(switchRow('云端失败时自动用本地补当前阶段', fallbackCheck, '拒绝、超时、接口错误或分析校验失败时启用；后续阶段继续优先云端。'));
+    card2.body.append(fallbackDetails);
+
 
     // 最终总结 LLM 子卡片（视觉明确区隔）
     const finalLlmCard = $(`<div class="rpig-subcard">
@@ -1849,7 +2378,7 @@ function buildSettingsUI() {
     shotModeSelect.on('change', () => { s.shotMode = shotModeSelect.val(); saveSettingsDebounced(); if (typeof window.rpigRefreshFloatingStatus === 'function') window.rpigRefreshFloatingStatus(); });
 
     const limbRuleNotice = $(`<div class="rpig-hint" style="color:var(--rpig-accent-green);background:rgba(52,211,153,0.08);padding:8px 10px;border-radius:6px;border:1px solid rgba(52,211,153,0.2);line-height:1.5;">
-        <b>✨ 肢体与手足规则：</b>允许自然完整出镜。严格约束每只手五指、每只脚五趾与关节连贯，已全面废除旧版强制裁切画外的限制。
+        <b>✨ 身体与手足规则：</b>保持参考体型、头身比例与关节连接；手足按姿态自然出镜，遮挡或画外部分不强行露全，交叠肢体保持清楚归属。
     </div>`);
     const previewBeforeGenerationCheck = $('<input type="checkbox">').prop('checked', s.previewBeforeGeneration !== false);
     previewBeforeGenerationCheck.on('change', () => {
@@ -1901,7 +2430,7 @@ function buildSettingsUI() {
     });
 
     const continuityNotice = $(`<div class="rpig-hint" style="color:var(--rpig-text-body);background:rgba(139,122,232,0.08);padding:8px 10px;border-radius:6px;border:1px solid rgba(139,122,232,0.2);line-height:1.4;">
-        <b>🔒 完整原图锁脸体系：</b>每一轮生图均以角色卡原图作为第一优先级身份锚点，上一张剧情图仅作为服装发型连续性参考，彻底杜绝连续生图脸部特征漂移。
+        <b>🔒 固定身份与画风参考：</b>每轮优先使用你指定的主身份图；未指定时使用角色卡原图。上传的多视图补充造型细节。关闭延续造型后，不发送上一张剧情图；实际脸部一致性仍需查看成图。
     </div>`);
 
     card4.body.append(switchRow('延续上一张剧情造型', continuityCheck, '以上张配图为图生图参考，继承衣物、发饰与道具；新剧情明确换装时仍服从新剧情'));
@@ -1957,7 +2486,7 @@ function buildSettingsUI() {
         <div style="flex:1;min-width:0;">
             <div class="rpig-summary-name"></div>
             <div class="rpig-summary-desc">
-                <span>✅ 原图锁脸已就绪（以角色原图为基准身份锚点）</span>
+                <span>✅ 参考来源已就绪（剧情使用★主身份图，未指定时使用角色卡原图）</span>
             </div>
         </div>
     </div>`);
@@ -2059,19 +2588,51 @@ function buildSettingsUI() {
         } else {
             views.forEach((view, index) => {
                 const item = $(document.createElement('div')).addClass('rpig-ref-item');
+                if (view.isPrimaryIdentity) item.addClass('is-primary');
                 const img = $(document.createElement('img')).attr('src', view.url || view.dataUrl).attr('alt', view.label || '视图');
                 const label = $(document.createElement('span')).text(view.label || `视图 ${index + 1}`);
+
+                const primaryBtn = $('<button type="button" class="rpig-ref-primary-btn" title="设为主身份参考">☆</button>');
+                if (view.isPrimaryIdentity) {
+                    primaryBtn.addClass('active').text('★').attr('title', '当前为主身份参考（点击取消）');
+                    item.append($('<div class="rpig-ref-primary-badge">主身份</div>'));
+                }
+                primaryBtn.on('click', async (e) => {
+                    e.stopPropagation();
+                    const willBePrimary = !view.isPrimaryIdentity;
+                    views.forEach(v => { v.isPrimaryIdentity = false; });
+                    view.isPrimaryIdentity = willBePrimary;
+                    try {
+                        await saveCharacterRefs(liveChar, views);
+                        await refreshRefsList();
+                        if (willBePrimary) {
+                            toastr.success(`已将「${view.label || `视图 ${index + 1}`}」设为主身份参考`);
+                        } else {
+                            toastr.info('已取消主身份参考，将默认使用角色卡完整原图');
+                        }
+                    } catch (err) {
+                        toastr.error(`设置主身份参考失败：${escapeHtml(err.message)}`);
+                    }
+                });
+
                 const del = $('<button title="删除参考图">✕</button>');
-                del.on('click', async () => {
+                del.on('click', async (e) => {
+                    e.stopPropagation();
                     views.splice(index, 1);
                     try {
                         await saveCharacterRefs(liveChar, views);
-                        refreshRefsList();
+                        await refreshRefsList();
                     } catch (e) {
                         toastr.error(`删除参考图失败：${escapeHtml(e.message)}`);
                     }
                 });
-                item.append(img, label, del);
+                const purpose = $('<select aria-label="参考图用途">').append('<option value="single">单视图</option><option value="full_body">完整立绘</option><option value="three_views">三视图/设计稿</option><option value="face_crop">主图脸部特写</option>');
+                purpose.val(view.viewType || (/三视|three_views|turnaround/i.test(view.label || '') ? 'three_views' : 'single'));
+                purpose.on('change', async () => { view.viewType = purpose.val(); await saveCharacterRefs(liveChar, views); });
+                const enabled = $('<input type="checkbox">').attr('aria-label', `使用参考图 ${view.label || index + 1}`)
+                    .prop('checked', view.isPrimaryIdentity || view.enabled !== false).prop('disabled', !!view.isPrimaryIdentity);
+                enabled.on('change', async () => { view.enabled = enabled.prop('checked'); await saveCharacterRefs(liveChar, views); });
+                item.append(img, primaryBtn, label, purpose, $('<label>').append(enabled, ' 使用本图'), del);
                 refsList.append(item);
             });
         }
@@ -2207,8 +2768,10 @@ function buildSettingsUI() {
             for (const file of files) imported.push(...await readReferenceImport(file));
             const existing = await getCharacterRefs(character);
             if (existing.length + imported.length > MAX_REFS_PER_CHAR) throw new Error('导入后将超过 50 张参考图上限，请先整理参考图');
-            // Store embedded bytes so an archive works across independent phone/PC servers.
-            await saveCharacterRefs(character, [...existing, ...imported]);
+            // 上传新参考图或导入不能悄悄替换已指定的主身份图
+            const hasExistingPrimary = existing.some(v => v.isPrimaryIdentity);
+            const safeImported = imported.map(v => (hasExistingPrimary && v.isPrimaryIdentity ? { ...v, isPrimaryIdentity: false } : v));
+            await saveCharacterRefs(character, [...existing, ...safeImported]);
             await refreshRefsList(); toastr.success(`已导入 ${imported.length} 张参考图`);
         } catch (error) { console.error('[RP 电影配图] 参考图导入失败:', error); toastr.error(escapeHtml(error.message)); }
         finally { this.value = ''; }
@@ -2252,10 +2815,36 @@ function buildSettingsUI() {
         }
         views.forEach((view, index) => {
             const item = $(document.createElement('div')).addClass('rpig-ref-item');
+            if (view.isPrimaryIdentity) item.addClass('is-primary');
             const img = $(document.createElement('img')).attr('src', view.url || view.dataUrl).attr('alt', view.label || 'User 视图');
             const label = $(document.createElement('span')).text(view.label || `User 视图 ${index + 1}`);
+
+            const primaryBtn = $('<button type="button" class="rpig-ref-primary-btn" title="设为 User 主身份参考">☆</button>');
+            if (view.isPrimaryIdentity) {
+                primaryBtn.addClass('active').text('★').attr('title', '当前为 User 主身份参考（点击取消）');
+                item.append($('<div class="rpig-ref-primary-badge">主身份</div>'));
+            }
+            primaryBtn.on('click', async (e) => {
+                e.stopPropagation();
+                const willBePrimary = !view.isPrimaryIdentity;
+                views.forEach(v => { v.isPrimaryIdentity = false; });
+                view.isPrimaryIdentity = willBePrimary;
+                try {
+                    await saveCharacterRefs('user', views);
+                    await refreshUserRefsList();
+                    if (willBePrimary) {
+                        toastr.success(`已将「${view.label || `User 视图 ${index + 1}`}」设为 User 主身份参考`);
+                    } else {
+                        toastr.info('已取消 User 主身份参考');
+                    }
+                } catch (err) {
+                    toastr.error(`设置 User 主身份参考失败：${escapeHtml(err.message)}`);
+                }
+            });
+
             const del = $('<button title="删除 User 参考图">✕</button>');
-            del.on('click', async () => {
+            del.on('click', async (e) => {
+                e.stopPropagation();
                 views.splice(index, 1);
                 try {
                     await saveCharacterRefs('user', views);
@@ -2264,7 +2853,7 @@ function buildSettingsUI() {
                     toastr.error(`删除 User 参考图失败：${escapeHtml(error.message)}`);
                 }
             });
-            item.append(img, label, del);
+            item.append(img, primaryBtn, label, del);
             userRefsList.append(item);
         });
     }
@@ -2282,7 +2871,9 @@ function buildSettingsUI() {
             for (const file of files) imported.push(...await readReferenceImport(file));
             const existing = await getCharacterRefs('user');
             if (existing.length + imported.length > MAX_REFS_PER_CHAR) throw new Error('导入后将超过 50 张 User 参考图上限，请先整理参考图');
-            await saveCharacterRefs('user', [...existing, ...imported]);
+            const hasExistingUserPrimary = existing.some(v => v.isPrimaryIdentity);
+            const safeUserImported = imported.map(v => (hasExistingUserPrimary && v.isPrimaryIdentity ? { ...v, isPrimaryIdentity: false } : v));
+            await saveCharacterRefs('user', [...existing, ...safeUserImported]);
             await refreshUserRefsList();
             toastr.success(`已导入 ${imported.length} 张 User 参考图`);
         } catch (error) {
@@ -2324,7 +2915,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.29</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.57</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2439,7 +3030,7 @@ function buildFloatingUI() {
         };
         const styleText = styleMap[s.stylePreset] || s.stylePreset || '自适应';
         const sizeText = s.imageSize || '16:9';
-        $('#rpig-fab-status').html(`绑定：<b>${escapeHtml(charName)}</b> · <b>${omniText}</b> · <b>${shotText}</b><br>画幅：${escapeHtml(sizeText)} · 画风：${escapeHtml(styleText)} · 后端：${escapeHtml(s.backend)}`);
+        $('#rpig-fab-status').html(`绑定：<b>${escapeHtml(charName)}</b> · <b>${omniText}</b> · <b>${shotText}</b><br>画幅：${escapeHtml(sizeText)} · 画风：${escapeHtml(styleText)} · 后端：${escapeHtml(isLocalQwen(s) ? '本地千问' : s.backend)}`);
     }
 
     window.rpigRefreshFloatingStatus = refreshStatus;
@@ -2701,20 +3292,28 @@ function buildFloatingUI() {
     window.rpigFloatingCleanup = keepFloatingUIVisible(fab[0], panel[0]);
 }
 
-function openSettingsPanel() {
+async function openSettingsPanel() {
     try {
+        $('.rpig-fab-panel').hide();
         if (typeof window.rpigRefreshCharacterUI === 'function') {
             window.rpigRefreshCharacterUI();
         }
         const drawer = $('#extensions-settings-button');
-        if ($('#rm_extensions_block').hasClass('closedDrawer')) {
-            drawer.find('.drawer-toggle').trigger('click');
+        const settingsContent = $('#rm_extensions_block');
+        if (settingsContent.hasClass('closedDrawer')) {
+            await doNavbarIconClick.call(drawer.find('.drawer-toggle')[0]);
+        }
+        const pluginDrawer = $('#rpig_container > .inline-drawer');
+        if (!pluginDrawer.length) return;
+        if (pluginDrawer.children('.inline-drawer-content').css('display') === 'none') {
+            toggleDrawer(pluginDrawer[0], true);
         }
         setTimeout(() => {
-            const target = $('#rpig_container');
-            if (target.length) {
-                $('#rm_extensions_block').animate({
-                    scrollTop: target.offset().top - $('#rm_extensions_block').offset().top + $('#rm_extensions_block').scrollTop(),
+            // The extension container uses display:contents, so scroll to its visible header.
+            const target = pluginDrawer.children('.inline-drawer-header');
+            if (target.length && settingsContent.hasClass('openDrawer')) {
+                settingsContent.stop(true).animate({
+                    scrollTop: target.offset().top - settingsContent.offset().top + settingsContent.scrollTop(),
                 }, 400);
             }
         }, 400);
@@ -2726,7 +3325,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.29</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.57</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -2789,6 +3388,7 @@ jQuery(async function () {
 
     eventSource.on(event_types.CHAT_CHANGED, () => {
         rpigImageRetryCache.clear();
+        for (const controller of rpigDetailEditorControllers) controller.abort(createAbortError('会话已切换'));
         rpigActiveTask?.controller.abort(createAbortError('会话已切换'));
         const removed = rpigGenerationQueue.splice(0);
         for (const task of removed) task.resolve({ cancelled: true, queued: true });
@@ -2817,5 +3417,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.29] User 三视图、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.57] User 三视图、结构化焦点分析与完整工作台已启用。');
 });

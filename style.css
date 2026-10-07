@@ -1512,6 +1512,73 @@ body.rpig-review-open {
   border: 1px solid var(--rpig-border);
 }
 
+.rpig-lightbox-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  cursor: default;
+}
+
+.rpig-local-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100003;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+  background: rgba(5, 7, 12, .94);
+  color: var(--rpig-text-body, #e5e8f0);
+}
+
+.rpig-local-detail-dialog {
+  width: min(880px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 18px;
+  box-sizing: border-box;
+  border: 1px solid var(--rpig-border, #3e4355);
+  border-radius: 16px;
+  background: var(--rpig-bg-panel, #171b29);
+  box-shadow: 0 16px 64px #0008;
+}
+
+.rpig-local-detail-header, .rpig-local-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rpig-local-detail-header { justify-content: space-between; }
+.rpig-local-detail-header h3 { margin: 0; font-size: 18px; }
+.rpig-local-detail-hint { margin: 8px 0 14px; font-size: 13px; color: var(--rpig-text-muted, #aaaec2); }
+.rpig-local-detail-stage { display: flex; justify-content: center; overflow: hidden; border-radius: 8px; background: #090b12; }
+.rpig-local-detail-image-wrap { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+.rpig-local-detail-canvas { display: block; max-width: 100%; max-height: 52dvh; width: auto; height: auto; touch-action: none; cursor: crosshair; }
+.rpig-local-detail-selection { position: absolute; pointer-events: none; box-sizing: border-box; border: 2px solid #c2b6ff; background: #a797ff20; box-shadow: 0 0 0 1px #0009; }
+.rpig-local-detail-overlay [hidden] { display: none !important; }
+.rpig-local-detail-controls { display: grid; grid-template-columns: 180px 1fr; gap: 12px; margin-top: 14px; }
+.rpig-local-detail-controls label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.rpig-local-detail-controls select, .rpig-local-detail-controls textarea { width: 100%; box-sizing: border-box; color: inherit; background: #0c101b; border: 1px solid var(--rpig-border, #3e4355); border-radius: 8px; padding: 9px; font: inherit; }
+.rpig-local-detail-controls textarea { resize: vertical; min-height: 66px; }
+.rpig-local-detail-status { margin: 12px 0; min-height: 20px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.rpig-local-detail-actions { justify-content: flex-end; flex-wrap: wrap; position: sticky; bottom: -18px; padding: 12px 0 4px; background: var(--rpig-bg-panel, #171b29); }
+.rpig-local-detail-dialog button { color: inherit; background: #252a3e; border: 1px solid var(--rpig-border, #3e4355); border-radius: 8px; padding: 9px 14px; cursor: pointer; font: inherit; }
+.rpig-local-detail-dialog button:disabled { opacity: .45; cursor: default; }
+.rpig-local-detail-dialog button:focus-visible, .rpig-local-detail-dialog select:focus-visible, .rpig-local-detail-dialog textarea:focus-visible { outline: 2px solid #c2b6ff; outline-offset: 2px; }
+.rpig-local-detail-dialog .rpig-local-detail-save { background: #6d5bc5; }
+.rpig-local-detail-dialog .rpig-local-detail-close { padding: 6px 10px; }
+
+@media (max-width: 600px) {
+  .rpig-local-detail-overlay { padding: 8px; }
+  .rpig-local-detail-dialog { padding: 12px; border-radius: 12px; }
+  .rpig-local-detail-controls { grid-template-columns: 1fr; gap: 8px; }
+  .rpig-local-detail-canvas { max-height: 42dvh; }
+  .rpig-local-detail-actions { bottom: -12px; }
+  .rpig-local-detail-dialog button { min-height: 42px; }
+}
+
 /* ============================================================
    6. 动画与微交互组件
    ============================================================ */

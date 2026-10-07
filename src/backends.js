@@ -1,3 +1,8 @@
+import { assertUsableInstruction } from './analysis-validation.js';
+import { isLocalQwen, qwenSteps, qwenSize, qwenReferenceEditPrompt, qwenIdentityRenderSettings, qwenSceneRenderPlan, selectQwenStoryReferences, qwenDetailEditPrompt } from './qwen.js';
+import { mirrorLayoutPlan, mirrorLayoutReference } from './mirror-layout.js';
+import { resizeSceneOutput } from './scene-output.js';
+import { supportedPosePlan, supportedPoseReference } from './pose-layout.js';
 // ============================================================
 // RP 电影配图 - 图片后端模块
 // ============================================================
@@ -34,6 +39,18 @@ export const SIZE_MAP = {
     '1:1':    { openai: '1024x1024', gemini: '1:1',   sd: [1024, 1024] },
     '9:16':   { openai: '1024x1536', gemini: '9:16',  sd: [768, 1344] },
 };
+
+// Only the dedicated region-edit entry point can override the ordinary Qwen
+// story size. This is a request-local value, never a saved resolution preset.
+const LOCAL_DETAIL_PATCH_SIZE = Symbol('local-detail-patch-size');
+const LOCAL_SCENE_RENDER_PLAN = Symbol('local-scene-render-plan');
+function localDetailPatchSize(value) {
+    const size = value === undefined ? [256, 256] : value;
+    if (!Array.isArray(size) || size.length !== 2 || size.some(n => !Number.isInteger(n) || n < 256 || n > 512 || n % 32 !== 0)) {
+        throw new RpigError('DETAIL_PATCH_SIZE_INVALID', '选区编辑尺寸须为两个 256–512 之间且为 32 倍数的整数');
+    }
+    return [...size];
+}
 
 function isGeminiImageModel(model) { return /(?:^|\/)gemini-[\w.-]*image[\w.-]*$/i.test(model || ''); }
 
@@ -102,14 +119,20 @@ export async function generateOpenAIChatImage(settings, prompt, aspectRatio, ref
  * @param {number} [maxRefs] 
  * @returns {Promise<Array>}
  */
-export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, maxRefs = 5, signal) {
+async function computeDataUrlHash(dataUrl) {
+    const bytes = Uint8Array.from(atob(dataUrl.split(',')[1]), c => c.charCodeAt(0));
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, maxRefs = 5, signal, diagnostics = null, onWarning = null) {
     if (!Array.isArray(refs) || refs.length === 0) return [];
     const hydrated = [];
-    const seen = new Set();
+    const seenDataUrlMap = new Map();
 
     for (const ref of refs) {
         throwIfAborted(signal);
-        if (!ref) throw new RpigError('REFERENCE_MISSING', '参考图记录为空，请重新上传或导入参考图');
+        if (!ref) throw new RpigError('REFERENCE_MISSING', '参考图记录为空，已停止，未跳过身份资料');
 
         let dataUrl = ref.dataUrl;
         if (!dataUrl && ref.url) {
@@ -119,29 +142,97 @@ export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, max
                 }
             } catch (err) {
                 if (isAbortError(err)) throw err;
-                throw new RpigError('REFERENCE_DOWNLOAD_FAILED', `参考图下载或转换失败；已停止生图，未降级为文生图。${scrubSensitiveText(err.message)}`, { reason: err.code || err.name });
+                console.warn("[RP] Reference fetch failed:", ref.url, err);
+                // 用户明确指定的主图读取失败时，停止本次生成并提示修复，不能静默替换
+                if (ref.isExplicitPrimary || (ref.role || ref.kind) === 'identity-primary') {
+                    diagnostics?.referenceFailures?.push({ ref: ref.label || ref.url, reason: err.message });
+                    throw new RpigError('PRIMARY_REFERENCE_READ_FAILED',
+                        `用户明确指定的主身份参考图读取失败 [${ref.label || ref.url}]，已停止本次生成以避免换脸。请检查网络、图片地址或在参考图库中重新指定。`,
+                        { originalError: err });
+                }
+                if (diagnostics && Array.isArray(diagnostics.referenceFailures)) {
+                    diagnostics.referenceFailures.push({ ref: ref.label || ref.url, reason: err.message });
+                }
+                throw new RpigError('REFERENCE_DOWNLOAD_FAILED', `辅助参考图读取失败 [${ref.label || ref.url}]，请修复或在图库中明确移除后重试`);
             }
         }
 
         if (typeof dataUrl !== 'string' || !/^data:image\/[\w.+-]+;base64,\S+$/i.test(dataUrl)) {
-            throw new RpigError('REFERENCE_MISSING', '参考图没有有效的图片数据或地址，请在此设备重新上传或导入；已停止生图');
+            if (ref.isExplicitPrimary || (ref.role || ref.kind) === 'identity-primary') {
+                diagnostics?.referenceFailures?.push({ ref: ref.label || ref.url, reason: 'Invalid dataUrl' });
+                throw new RpigError('PRIMARY_REFERENCE_READ_FAILED',
+                    `用户明确指定的主身份参考图数据无效 [${ref.label || ref.url || '未知'}]，已停止本次生成以避免换脸。`);
+            }
+            console.warn("[RP] Reference invalid, skipping:", ref.url || ref.label);
+            if (diagnostics && Array.isArray(diagnostics.referenceFailures)) {
+                diagnostics.referenceFailures.push({ ref: ref.label || ref.url, reason: 'Invalid dataUrl' });
+            }
+            throw new RpigError('REFERENCE_INVALID', `参考图数据无效 [${ref.label || ref.url || '未知'}]，已停止，未静默丢图`);
         }
-        if (!seen.has(dataUrl)) {
-            if (hydrated.length >= maxRefs) throw new RpigError('REFERENCE_LIMIT', `参考图超过当前允许的 ${maxRefs} 张，已停止；未截断参考图。`);
-            seen.add(dataUrl);
-            hydrated.push({
-                ...ref,
-                dataUrl: dataUrl,
-            });
+
+        // 处理去重及跨身份冲突检查
+        if (seenDataUrlMap.has(dataUrl)) {
+            const existingRef = seenDataUrlMap.get(dataUrl);
+            if (existingRef.identityId && ref.identityId && existingRef.identityId !== ref.identityId) {
+                const conflictMsg = `参考图身份冲突：同一张图片被同时赋给了 [${existingRef.identityName || existingRef.identityId}] 和 [${ref.identityName || ref.identityId}]！建议在参考图库中为不同角色分别指定专属立绘。`;
+                console.warn(`[RP-Diag] ${conflictMsg}`);
+                if (diagnostics && Array.isArray(diagnostics.conflicts)) {
+                    diagnostics.conflicts.push(conflictMsg);
+                }
+                if (typeof onWarning === 'function') onWarning(conflictMsg);
+                throw new RpigError('REFERENCE_IDENTITY_CONFLICT', conflictMsg);
+            } else {
+                console.info(`[RP-Diag] 同一人物的重复参考图已去重: ${ref.label || ref.identityName}`);
+            }
+            // Only same-identity duplicates are safe to remove.
+            continue;
         }
+
+        if (hydrated.length >= maxRefs) {
+            throw new RpigError('REFERENCE_LIMIT', `参考图超过当前允许的 ${maxRefs} 张，已停止；未截断参考图。`);
+        }
+
+        seenDataUrlMap.set(dataUrl, ref);
+        hydrated.push({
+            ...ref,
+            dataUrl: dataUrl,
+        });
     }
+
+    // 确定最终图片顺序：主身份图优先（按 character -> user），随后是辅助图
+    hydrated.sort((a, b) => {
+        const aIsPrimary = a.role === 'identity-primary' || a.kind === 'identity-primary';
+        const bIsPrimary = b.role === 'identity-primary' || b.kind === 'identity-primary';
+        if (aIsPrimary && !bIsPrimary) return -1;
+        if (!aIsPrimary && bIsPrimary) return 1;
+        return 0;
+    });
+
+    // 按最终顺序生成编号和身份映射，并计算哈希
+    for (const [index, ref] of hydrated.entries()) {
+        ref.referenceIndex = index + 1;
+        ref.hash = await computeDataUrlHash(ref.dataUrl);
+    }
+
+    // 将最终经过读取、去重与编号的参考图同步回全链路诊断
+    if (diagnostics) {
+        diagnostics.referenceCount = hydrated.length;
+        diagnostics.references = hydrated.map(r => ({
+            referenceIndex: r.referenceIndex,
+            role: r.role || r.kind,
+            source: r.source,
+            identityId: r.identityId,
+            identityName: r.identityName,
+            label: r.label,
+            hash: r.hash,
+            dataLength: r.dataUrl ? r.dataUrl.length : 0,
+        }));
+    }
+
     return hydrated;
 }
-
-/**
- * 统一后端入口
- */
 export async function generateImage(settings, prompt, avoid, refs, options = {}) {
+    assertUsableInstruction(prompt);
     const s = settings || {};
     const size = SIZE_MAP[s.imageSize] || SIZE_MAP['16:9'];
     const onWarning = options.onWarning || (() => {});
@@ -149,20 +240,72 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
 
     throwIfAborted(options.signal);
     if (s.stylePreset === 'reference') {
-        if (!refs?.length || refs.every(ref => ref.kind === 'continuity')) throw new RpigError('REFERENCE_REQUIRED', '参考图驱动模式需要角色图片。请先导入图片；不会改为纯文生图。');
+        if (!refs?.length || refs.every(ref => ref.kind === 'continuity')) {
+            throw new RpigError('IDENTITY_REFERENCE_REQUIRED', '参考图驱动需要该入镜人物的身份参考图；未找到原图，已停止以避免重新设计人物');
+        }
         if (![BACKENDS.OPENAI, BACKENDS.GEMINI, BACKENDS.SD].includes(s.backend || BACKENDS.OPENAI)) throw new RpigError('REFERENCE_BACKEND_UNSUPPORTED', '参考图驱动模式请使用 OpenAI 兼容图片接口、Gemini 或 SD img2img；当前后端未验证图片编辑能力，已停止。');
     }
-    const hydratedRefs = await hydrateReferenceImages(refs, fetchFn, refs?.length || 0, options.signal);
-    if (hydratedRefs.length > 1 && [BACKENDS.SD, BACKENDS.COMFYUI, BACKENDS.TAVERN_SD].includes(s.backend)) {
+    const selectedRefs = isLocalQwen(s) ? selectQwenStoryReferences(refs, s) : refs;
+    if (options.diagnostics && isLocalQwen(s)) options.diagnostics.referenceSelection = {
+        policy:s.qwenReferencePolicy || 'story', supplied:refs?.length || 0, sent:selectedRefs?.length || 0,
+        omitted:(refs || []).filter(r => !selectedRefs.includes(r)).map(r => ({identityName:r.identityName, label:r.label, reason:'supporting costume view omitted from story request'})),
+    };
+    const hydratedRefs = await hydrateReferenceImages(selectedRefs, fetchFn, selectedRefs?.length || 0, options.signal, options.diagnostics, onWarning);
+    if (s.stylePreset === 'reference' && !hydratedRefs.some(ref => (ref.role || ref.kind) === 'identity-primary')) {
+        throw new RpigError('IDENTITY_REFERENCE_REQUIRED', '身份主图未成功读取，已停止生图');
+    }
+    if (!isLocalQwen(s) && hydratedRefs.length > 1 && [BACKENDS.SD, BACKENDS.COMFYUI, BACKENDS.TAVERN_SD].includes(s.backend)) {
         throw new RpigError('MULTI_REFERENCE_UNSUPPORTED', '当前后端尚未实现同时使用多张参考图，已停止，未只取第一张。请使用支持多图的 OpenAI 兼容图片接口或 Gemini，或自行保留一张参考图。');
     }
     const prepared = preparePromptForBackend(s, prompt, avoid, options);
-    if (s.stylePreset === 'reference') prepared.prompt = referenceImageEditPrompt(prepared.prompt, hydratedRefs);
+    const sceneRenderPlan = isLocalQwen(s) && s.stylePreset === 'reference' ? qwenSceneRenderPlan(s,hydratedRefs,s.imageSize || '16:9',prepared.prompt) : null;
+    const supportedPose = sceneRenderPlan ? supportedPosePlan(prepared.prompt,hydratedRefs,s) : null;
+    if(supportedPose){
+        const layout=supportedPoseReference(supportedPose,...sceneRenderPlan.renderSize);
+        layout.referenceIndex=hydratedRefs.length+1;layout.hash=await computeDataUrlHash(layout.dataUrl);hydratedRefs.push(layout);
+        if(options.diagnostics){
+            options.diagnostics.poseGeometry={kind:supportedPose.kind,identityNames:supportedPose.identityNames,hand:supportedPose.hand,
+                referenceIndex:layout.referenceIndex,projectedPeople:layout.projectedPeople};
+            options.diagnostics.referenceCount=hydratedRefs.length;options.diagnostics.referenceSelection.sent=hydratedRefs.length;
+            options.diagnostics.referenceSelection.generated=1;
+            options.diagnostics.references.push({referenceIndex:layout.referenceIndex,role:layout.role,source:layout.source,label:layout.label,hash:layout.hash});
+        }
+    }
+    if (isLocalQwen(s) && s.stylePreset === 'reference') {
+        const plan = mirrorLayoutPlan(prepared.prompt, hydratedRefs, s);
+        if (plan) {
+            const [width,height] = sceneRenderPlan?.renderSize || qwenSize(s);
+            const layout = mirrorLayoutReference(plan,width,height);
+            layout.referenceIndex = hydratedRefs.length + 1;
+            layout.hash = await computeDataUrlHash(layout.dataUrl);
+            hydratedRefs.push(layout);
+            if (options.diagnostics) {
+                options.diagnostics.mirrorGeometry = {kind:plan.kind,hand:plan.hand,cameraSide:plan.cameraSide,
+                    referenceIndex:hydratedRefs.length,geometryContact:layout.geometryContact,reflectedContact:layout.reflectedContact};
+                options.diagnostics.referenceCount = hydratedRefs.length;
+                options.diagnostics.referenceSelection.sent = hydratedRefs.length;
+                options.diagnostics.referenceSelection.generated = 1;
+                options.diagnostics.references.push({referenceIndex:layout.referenceIndex,role:layout.role,
+                    source:layout.source,label:layout.label,hash:layout.hash,dataLength:layout.dataUrl.length});
+            }
+        }
+    }
+    if (s.stylePreset === 'reference') prepared.prompt = isLocalQwen(s)
+        ? qwenReferenceEditPrompt(prepared.prompt, hydratedRefs, {compactScene:s.qwenSceneDetail === true})
+        : referenceImageEditPrompt(prepared.prompt, hydratedRefs);
 
     let result;
-    switch (s.backend) {
+    if (isLocalQwen(s)) {
+        result = await generateGeminiImage(s, prepared.prompt, size.gemini, hydratedRefs, {
+            ...options, negativePrompt: options.negativePrompt ?? prepared.avoid,
+            [LOCAL_SCENE_RENDER_PLAN]:sceneRenderPlan,
+        });
+    } else switch (s.backend) {
         case BACKENDS.GEMINI:
-            result = await generateGeminiImage(s, prepared.prompt, size.gemini, hydratedRefs, options);
+            result = await generateGeminiImage(s, prepared.prompt, size.gemini, hydratedRefs, {
+                ...options,
+                negativePrompt: options.negativePrompt ?? prepared.avoid,
+            });
             break;
         case BACKENDS.SD:
             result = await generateSDImage(s, prepared.prompt, prepared.avoid, size.sd, hydratedRefs, options);
@@ -196,11 +339,55 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
             break;
     }
 
+    if (sceneRenderPlan) {
+        result.dataUrl = await (options.resizeSceneImage || resizeSceneOutput)(result.dataUrl,sceneRenderPlan,{signal:options.signal});
+        result.outputSize=[...sceneRenderPlan.outputSize];
+        if (options.diagnostics) options.diagnostics.outputSize=[...sceneRenderPlan.outputSize];
+    }
     return {
         ...result,
         usedPrompt: prepared.prompt,
         usedAvoid: prepared.avoid,
     };
+}
+
+/** Edit one explicitly selected crop; the caller owns source-image preservation
+ * and mask compositing. This never invokes ordinary story analysis or templates. */
+export async function generateLocalDetailEdit(settings, instruction, patchDataUrl, options = {}) {
+    throwIfAborted(options.signal);
+    if (!isLocalQwen(settings)) throw new RpigError('DETAIL_LOCAL_BACKEND_REQUIRED', '选区编辑目前仅支持本地千问桥接');
+    assertUsableInstruction(instruction, '选区编辑指令');
+    const patchSize = localDetailPatchSize(options.patchSize);
+    if (typeof patchDataUrl !== 'string' || !/^data:image\/[\w.+-]+;base64,\S+$/i.test(patchDataUrl)) {
+        throw new RpigError('DETAIL_PATCH_REQUIRED', '选区编辑需要当前已成图裁剪的图片数据');
+    }
+    const requestId = options.requestId || `detail_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const diagnostic = options.diagnostics || {};
+    const prompt = qwenDetailEditPrompt(instruction);
+    const editSettings = { ...settings, qwenIdentityDetailBoost: false, qwenSteps: 20, qwenCfg: 1,
+        imageSize: `${patchSize[0]}:${patchSize[1]}` };
+    Object.assign(diagnostic, { requestId, mode: 'local-detail-edit', status: 'running', stage: 'region-edit',
+        startedAt: new Date().toISOString(), patchSize: [...patchSize], instruction: instruction.trim(),
+        referenceFailures: [], references: [], referenceCount: 1 });
+    try {
+        const refs = await hydrateReferenceImages([{ dataUrl: patchDataUrl, role: 'edit-target', kind: 'edit-target',
+            source: 'selected-region', label: 'Selected region of the finished illustration' }],
+            options.fetchToDataUrl || fetchToDataUrl, 1, options.signal, diagnostic, options.onWarning);
+        throwIfAborted(options.signal);
+        const result = await generateGeminiImage(editSettings, prompt, editSettings.imageSize, refs, {
+            ...options, requestId, diagnostics: diagnostic, negativePrompt: '', openAICompatibleRelay: false,
+            [LOCAL_DETAIL_PATCH_SIZE]: patchSize,
+        });
+        throwIfAborted(options.signal);
+        Object.assign(diagnostic, { status: 'success', stage: 'complete' });
+        return { ...result, usedPrompt: prompt, usedAvoid: '', requestId, patchSize: [...patchSize], diagnostics: diagnostic };
+    } catch (error) {
+        Object.assign(diagnostic, { status: isAbortError(error) ? 'cancelled' : 'failed',
+            error: scrubSensitiveText(error.message || String(error), [settings.backendKey]), errorCode: error.code || null });
+        throw error;
+    } finally {
+        diagnostic.finishedAt = new Date().toISOString();
+    }
 }
 
 /**
@@ -355,6 +542,33 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
     const key = (settings.backendKey || '').trim();
 
     const parts = [];
+    const isUnifiedPrompt = prompt.startsWith('Edit the supplied references') ||
+                            prompt.includes('PRIMARY REFERENCE:') ||
+                            prompt.includes('Preserve each character\'s identity');
+    if (isUnifiedPrompt || isLocalQwen(settings)) {
+        // 新链路：参考图以最终顺序送入，发送简短逐图标签与对应 inlineData，保留编号与映射
+        if (Array.isArray(refs)) {
+            for (const [index, ref] of refs.entries()) {
+                if (ref && ref.dataUrl) {
+                    const mime = ref.dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/)?.[1] || 'image/png';
+                    const base64Data = ref.dataUrl.split(',')[1];
+                    if (base64Data) {
+                        // Roles are already in REFERENCE MAPPING. The bridge sees
+                        // one editing instruction, not a second parallel template.
+                        parts.push({
+                            inlineData: {
+                                mimeType: mime,
+                                data: base64Data,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        // 插件统一模板，附带精简编号映射，明确图 1 承担指定画风参考
+        const promptWithMap = isLocalQwen(settings) ? prompt : referenceImageEditPrompt(prompt, refs);
+        parts.push({ text: promptWithMap });
+    } else {
     const identityNames = [...new Set((refs || []).filter(ref => ref?.kind !== 'continuity' && ref?.identityName).map(ref => String(ref.identityName).trim()).filter(Boolean))];
     if (Array.isArray(refs) && refs.length > 0) {
         // 多张同一角色参考图容易被 Gemini 误解成多个主体。
@@ -389,6 +603,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
     parts.push({
         text: `MAIN GENERATION INSTRUCTION: ${prompt}\n\nIdentity consistency is mandatory at every camera distance and after every wardrobe, pose, expression, lighting, or location change. A distant or full-body shot must keep the same recognizable face and facial proportions as the primary identity reference.`,
     });
+    }
 
     const headers = { 'Content-Type': 'application/json' };
     if (key) {
@@ -396,6 +611,27 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
         else headers['x-goog-api-key'] = key;
     }
 
+    const isLocalBridge = isLocalQwen(settings);
+    const backendLabel = isLocalBridge ? '本地千问' : 'Gemini';
+
+    if (isLocalBridge) {
+        let capabilities;
+        try {
+            const response = await fetch(`${base}/rpig-capabilities`, {
+                signal: combineAbortSignals(options.signal, timeoutSignal(5000)),
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            capabilities = await response.json();
+        } catch (error) {
+            if (isAbortError(error) && options.signal?.aborted) throw error;
+            throw new RpigError('BRIDGE_VERSION_MISMATCH', '本地桥接未通过版本核验，可能启动了旧副本。已停止生图，请启动统一入口后重试');
+        }
+        if (capabilities?.bridge !== 'rpig-qwen' || capabilities?.protocol !== 2
+            || capabilities?.reference_order !== true || capabilities?.explicit_dimensions !== true) {
+            throw new RpigError('BRIDGE_VERSION_MISMATCH', '8055 上运行的不是支持多参考图与尺寸透传的修复版桥接，已停止生图');
+        }
+        if (options.diagnostics) options.diagnostics.bridge = capabilities;
+    }
     const requestBody = {
         contents: [{ role: 'user', parts: parts }],
         generationConfig: {
@@ -408,7 +644,49 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
         },
     };
 
+    if (isLocalBridge) {
+        // 本地 Qwen 桥接专有参数，区分画幅与分辨率档位，支持 16:9, 9:16, 1:1, 2.39:1, 4:3, 3:4 等
+        const scenePlan = options[LOCAL_SCENE_RENDER_PLAN];
+        const renderSettings = options[LOCAL_DETAIL_PATCH_SIZE] || scenePlan ? settings : qwenIdentityRenderSettings(settings, refs);
+        const [targetWidth, targetHeight] = options[LOCAL_DETAIL_PATCH_SIZE] || scenePlan?.renderSize || qwenSize(renderSettings, aspectRatio);
+        requestBody.width = targetWidth;
+        requestBody.height = targetHeight;
+        requestBody.steps = qwenSteps(renderSettings.qwenSteps);
+        requestBody.cfg_scale = Number.isFinite(settings.qwenCfg) ? settings.qwenCfg : 1.0;
+        requestBody.reference_profile = scenePlan?.referenceProfile || renderSettings.qwenReferenceProfile || 'balanced';
+        if (options.diagnostics) options.diagnostics.identityDetailBoost = renderSettings !== settings;
+        if (options.diagnostics && scenePlan) options.diagnostics.sceneRendering = {mode:'whole-scene-detail',renderSize:scenePlan.renderSize,
+            outputSize:scenePlan.outputSize,steps:requestBody.steps,cfg:requestBody.cfg_scale,referenceProfile:requestBody.reference_profile,diffusionPasses:1};
+        requestBody.cache_type = settings.qwenCacheType || 'q8_0';
+
+        if (settings.qwenSeed !== undefined && settings.qwenSeed !== '' && Number(settings.qwenSeed) >= 0) {
+            requestBody.seed = Number(settings.qwenSeed);
+        } else {
+            requestBody.seed = -1; // 显式 -1 表示随机
+        }
+
+        if (options.negativePrompt !== undefined && options.negativePrompt !== null) {
+            requestBody.negative_prompt = String(options.negativePrompt).trim();
+        }
+        if (options.requestId) {
+            requestBody.request_id = options.requestId;
+        }
+    }
+
+    if (options.diagnostics) {
+        options.diagnostics.sentPrompt = parts.filter(p => typeof p.text === 'string').map(p => p.text).join(' \n');
+        options.diagnostics.requestedSize = isLocalBridge ? [requestBody.width, requestBody.height] : null;
+        options.diagnostics.requestedAspectRatio = settings.imageSize || aspectRatio;
+    }
     const url = `${base}/models/${encodeURIComponent(model)}:generateContent`;
+
+    const cancelLocal = () => {
+        if (isLocalBridge && options.requestId) {
+            fetch(`${base}/rpig-cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_id: options.requestId }) }).catch(() => {});
+        }
+    };
+    options.signal?.addEventListener('abort', cancelLocal, { once: true });
 
     let res;
     try {
@@ -416,28 +694,32 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
             method: 'POST',
             headers: headers,
             body: JSON.stringify(requestBody),
-            signal: combineAbortSignals(options.signal, timeoutSignal(300000)),
+            signal: combineAbortSignals(options.signal, timeoutSignal(isLocalBridge ? 690000 : 300000)),
         });
     } catch (netErr) {
+        cancelLocal();
         if (isAbortError(netErr)) throw netErr;
-        throw requestFailure(netErr, url, 'Gemini 图片连接失败', [key]);
+        throw requestFailure(netErr, url, `${backendLabel} 图片连接失败`, [key]);
+    } finally {
+        options.signal?.removeEventListener('abort', cancelLocal);
     }
 
     if (!res.ok) {
         const errText = await res.text().catch(() => '');
-        throw new RpigError('GEMINI_IMAGE_HTTP', `Gemini 图片 HTTP ${res.status}: ${upstreamErrorMessage(errText, [key])}`, { status: res.status });
+        throw new RpigError(isLocalBridge ? 'QWEN_IMAGE_HTTP' : 'GEMINI_IMAGE_HTTP', `${backendLabel} 图片 HTTP ${res.status}: ${upstreamErrorMessage(errText, [key])}`, { status: res.status });
     }
 
     const data = await res.json();
+    if (options.diagnostics && data.rpig) options.diagnostics.engine = data.rpig;
     const candidateParts = data?.candidates?.[0]?.content?.parts || [];
     const imagePart = candidateParts.find(p => p.inlineData || p.inline_data);
 
     if (!imagePart) {
         const textPart = candidateParts.find(p => p.text);
         if (textPart && textPart.text) {
-            throw new Error(`Gemini 未生成图片，返回文本：${textPart.text.slice(0, 150)}`);
+            throw new Error(`${backendLabel} 未生成图片，返回文本：${textPart.text.slice(0, 150)}`);
         }
-        throw new Error('Gemini 未返回图片数据');
+        throw new Error(`${backendLabel} 未返回图片数据`);
     }
 
     const b64 = imagePart.inlineData?.data || imagePart.inline_data?.data;

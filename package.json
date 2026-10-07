@@ -1,29 +1,31 @@
 {
-  "name": "sillytavern-rp-cinematic-imagegen",
-  "version": "2.9.29",
-  "private": true,
-  "description": "SillyTavern 电影级角色扮演配图扩展",
-  "license": "MIT",
-  "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen.git"
-  },
-  "scripts": {
-    "check": "node scripts/check-release.mjs",
-    "test": "node --test tests/cancellation.test.mjs tests/cast.test.mjs tests/llm.test.mjs tests/mobile-ui.test.mjs tests/mobile-behavior.test.mjs tests/reference-storage.test.mjs tests/settings.test.mjs tests/tavern-helper-installer.test.mjs tests/image-retry.test.mjs tests/gemini-protocol.test.mjs tests/reference-import.test.mjs tests/reference-style.test.mjs",
-    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
-    "prepare:repo": "node scripts/prepare-github.mjs",
-    "test:android": "node scripts/test-android.mjs",
-    "test:android:server": "node scripts/android-fixture-server.mjs",
-    "test:android:gallery": "node scripts/test-android-gallery.mjs",
-    "test:android:settings": "node scripts/test-android-settings.mjs",
-    "test:android:import": "node scripts/test-android-import.mjs"
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "devDependencies": {
-    "fake-indexeddb": "^6.2.5"
-  }
+    "name": "sillytavern-rp-cinematic-imagegen",
+    "version": "2.9.57",
+    "private": true,
+    "description": "SillyTavern 电影级角色扮演配图扩展",
+    "license": "MIT",
+    "type": "module",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen.git"
+    },
+    "scripts": {
+        "check": "node scripts/check-release.mjs",
+        "test": "node --test tests/cancellation.test.mjs tests/cast.test.mjs tests/llm.test.mjs tests/mobile-ui.test.mjs tests/mobile-behavior.test.mjs tests/reference-storage.test.mjs tests/settings.test.mjs tests/tavern-helper-installer.test.mjs tests/image-retry.test.mjs tests/gemini-protocol.test.mjs tests/reference-import.test.mjs tests/reference-style.test.mjs tests/story-pipeline.test.mjs tests/visual-constraints.test.mjs tests/local-detail.test.mjs tests/local-detail-backend.test.mjs tests/local-detail-save.test.mjs tests/local-detail-integration.test.mjs tests/nonhuman-reference.test.mjs tests/character-design-library.test.mjs tests/scene-prompt-library.test.mjs tests/viewpoint-prompt.test.mjs tests/mirror-layout.test.mjs tests/scene-detail.test.mjs tests/llm-fallback.test.mjs tests/character-world-context.test.mjs",
+        "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+        "prepare:repo": "node scripts/prepare-github.mjs",
+        "docs:prompts": "node scripts/update-prompt-library-docs.mjs",
+        "test:android": "node scripts/test-android.mjs",
+        "test:android:server": "node scripts/android-fixture-server.mjs",
+        "test:android:gallery": "node scripts/test-android-gallery.mjs",
+        "test:android:settings": "node scripts/test-android-settings.mjs",
+        "test:android:import": "node scripts/test-android-import.mjs",
+        "test:local": "node --test tests/local-scene-proxy.test.mjs tests/local-scene-server.test.mjs"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "devDependencies": {
+        "fake-indexeddb": "^6.2.5"
+    }
 }

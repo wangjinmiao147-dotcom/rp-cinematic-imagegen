@@ -24,6 +24,10 @@ jobs:
         run: npm run check
       - name: Test behavior and cancellation paths
         run: npm test
+      - name: Install optional local service dependency
+        run: npm ci --prefix tools/local-scene-llm
+      - name: Test optional local service
+        run: npm run test:local
       - name: Build SillyTavern package
         run: npm run build
       - name: Upload build artifact
@@ -36,4 +40,4 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes --verify-tag
+        run: gh release create "${{ github.ref_name }}" dist/* --title "RP 电影配图 ${{ github.ref_name }}" --notes-file "docs/RELEASE_${{ github.ref_name }}.md" --verify-tag

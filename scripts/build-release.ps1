@@ -1,96 +1,59 @@
 [CmdletBinding()]
-param(
-    [string]$OutputDirectory = 'dist'
-)
-
+param([string]$OutputDirectory = 'dist')
 $ErrorActionPreference = 'Stop'
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$outputPath = Join-Path $repoRoot $OutputDirectory
-$manifest = Get-Content -LiteralPath (Join-Path $repoRoot 'manifest.json') -Raw | ConvertFrom-Json
+$repoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+$outputPath = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDirectory))
+if (-not $outputPath.StartsWith($repoRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Build output must be inside this repository.' }
+$manifest = Get-Content -LiteralPath (Join-Path $repoRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$files = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'release-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $version = [string]$manifest.version
-$archiveName = "rp-cinematic-imagegen-v$version.zip"
-$archivePath = Join-Path $outputPath $archiveName
-$checksumPath = "$archivePath.sha256"
-$installerSource = Join-Path $repoRoot 'installers\rp-cinematic-imagegen-tavern-helper-installer.json'
-$installerName = "rp-cinematic-imagegen-tavern-helper-installer-v$version.json"
-$installerPath = Join-Path $outputPath $installerName
-$installerChecksumPath = "$installerPath.sha256"
 
-function Write-Sha256File {
-    param(
-        [Parameter(Mandatory = $true)][string]$InputPath,
-        [Parameter(Mandatory = $true)][string]$OutputPath
-    )
-
-    $stream = [System.IO.File]::OpenRead($InputPath)
-    try {
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            $hashBytes = $sha256.ComputeHash($stream)
-            $hash = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
-        }
-        finally {
-            $sha256.Dispose()
-        }
-    }
-    finally {
-        $stream.Dispose()
-    }
-
+function Write-Sha256File([string]$InputPath) {
+    $stream = [IO.File]::OpenRead($InputPath)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $hash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose(); $stream.Dispose() }
     $fileName = Split-Path -Leaf $InputPath
-    Set-Content -LiteralPath $OutputPath -Value "$hash  $fileName" -Encoding utf8
-    return $hash
+    [IO.File]::WriteAllText($InputPath + '.sha256', "$hash  $fileName`n", [Text.UTF8Encoding]::new($false))
+    Write-Output "Created: $fileName ($hash)"
 }
-
-& node (Join-Path $PSScriptRoot 'check-release.mjs')
-if ($LASTEXITCODE -ne 0) { throw 'Release validation failed. ZIP was not created.' }
-
-New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
-$oldArtifacts = Get-ChildItem -LiteralPath $outputPath -File | Where-Object {
-    $_.Name -like 'rp-cinematic-imagegen-v*.zip*' -or
-    $_.Name -like 'rp-cinematic-imagegen-tavern-helper-installer-v*.json*'
-}
-foreach ($artifact in $oldArtifacts) {
-    Remove-Item -LiteralPath $artifact.FullName -Force
-}
-$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rpig-release-" + [guid]::NewGuid().ToString('N'))
-$bundleRoot = Join-Path $tempRoot 'rp-cinematic-imagegen'
-
-try {
-    New-Item -ItemType Directory -Path (Join-Path $bundleRoot 'src') -Force | Out-Null
-
-    $files = @(
-        'manifest.json',
-        'index.js',
-        'style.css',
-        'README.md',
-        'LICENSE',
-        'CHANGELOG.md',
-        'SECURITY.md'
-    )
-    foreach ($file in $files) {
-        Copy-Item -LiteralPath (Join-Path $repoRoot $file) -Destination (Join-Path $bundleRoot $file)
+function Copy-ReleaseFiles([string]$SourceRoot, [string]$DestinationRoot, [string[]]$FileList) {
+    foreach ($file in $FileList) {
+        $source = [IO.Path]::GetFullPath((Join-Path $SourceRoot $file))
+        if (-not $source.StartsWith([IO.Path]::GetFullPath($SourceRoot) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Release path escaped its source root.' }
+        $destination = Join-Path $DestinationRoot $file
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $destination
     }
-    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'src') -Filter '*.js' -File |
-        Copy-Item -Destination (Join-Path $bundleRoot 'src')
-    New-Item -ItemType Directory -Path (Join-Path $bundleRoot 'docs') -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\android-debugging.md') -Destination (Join-Path $bundleRoot 'docs')
-
-    Compress-Archive -LiteralPath $bundleRoot -DestinationPath $archivePath -CompressionLevel Optimal
-    Copy-Item -LiteralPath $installerSource -Destination $installerPath
-
-    $archiveHash = Write-Sha256File -InputPath $archivePath -OutputPath $checksumPath
-    $installerHash = Write-Sha256File -InputPath $installerPath -OutputPath $installerChecksumPath
-    Write-Output "Created: $archivePath"
-    Write-Output "SHA256: $archiveHash"
-    Write-Output "Created: $installerPath"
-    Write-Output "SHA256: $installerHash"
+}
+& node (Join-Path $PSScriptRoot 'check-release.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'Release validation failed.' }
+New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
+$tempRoot = Join-Path $outputPath ('.rpig-build-' + [guid]::NewGuid().ToString('N'))
+$extensionRoot = Join-Path $tempRoot 'rp-cinematic-imagegen'
+$localRoot = Join-Path $tempRoot 'rp-cinematic-local-scene-llm'
+try {
+    Copy-ReleaseFiles $repoRoot $extensionRoot $files.extensionFiles
+    Copy-ReleaseFiles (Join-Path $repoRoot 'tools\local-scene-llm') $localRoot $files.localServiceFiles
+    $extensionZip = Join-Path $outputPath "rp-cinematic-imagegen-v$version.zip"
+    $localZip = Join-Path $outputPath "rp-cinematic-local-scene-llm-v$version.zip"
+    Compress-Archive -LiteralPath $extensionRoot -DestinationPath $extensionZip -CompressionLevel Optimal -Force
+    Compress-Archive -LiteralPath $localRoot -DestinationPath $localZip -CompressionLevel Optimal -Force
+    # Verify actual compressed contents by extracting the newly produced ZIPs.
+    $verification = Join-Path $tempRoot 'verify'
+    Expand-Archive -LiteralPath $extensionZip -DestinationPath (Join-Path $verification 'extension')
+    Expand-Archive -LiteralPath $localZip -DestinationPath (Join-Path $verification 'local')
+    & node (Join-Path $PSScriptRoot 'check-artifacts.mjs') (Join-Path $verification 'extension\rp-cinematic-imagegen') (Join-Path $verification 'local\rp-cinematic-local-scene-llm')
+    if ($LASTEXITCODE -ne 0) { throw 'Extracted ZIP validation failed.' }
+    $installer = Join-Path $outputPath "rp-cinematic-imagegen-tavern-helper-installer-v$version.json"
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'installers\rp-cinematic-imagegen-tavern-helper-installer.json') -Destination $installer -Force
+    Write-Sha256File $extensionZip
+    Write-Sha256File $localZip
+    Write-Sha256File $installer
 }
 finally {
-    $resolvedTemp = [System.IO.Path]::GetFullPath($tempRoot)
-    $systemTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-    if ($resolvedTemp.StartsWith($systemTemp, [System.StringComparison]::OrdinalIgnoreCase) -and
-        (Split-Path -Leaf $resolvedTemp).StartsWith('rpig-release-')) {
-        Remove-Item -LiteralPath $resolvedTemp -Recurse -Force -ErrorAction SilentlyContinue
+    $resolved = [IO.Path]::GetFullPath($tempRoot)
+    if ($resolved.StartsWith($outputPath + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $resolved).StartsWith('.rpig-build-')) {
+        Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

@@ -110,6 +110,7 @@ export function getPreviousGeneratedImage(chat, beforeIndex, character, options 
             prompt: typeof info.basePrompt === 'string'
                 ? info.basePrompt
                 : (typeof info.prompt === 'string' ? info.prompt : ''),
+            sceneState: info.sceneState || null,
             messageIndex,
             sourceType,
         };

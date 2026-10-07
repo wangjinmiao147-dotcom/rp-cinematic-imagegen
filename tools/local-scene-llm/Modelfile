@@ -1,0 +1,11 @@
+FROM ./Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf
+
+# Partial GPU offload example. The proxy sends runtime options.
+PARAMETER num_gpu 21
+PARAMETER num_thread 6
+PARAMETER num_batch 32
+PARAMETER num_ctx 16384
+PARAMETER num_predict 3072
+PARAMETER temperature 0.3
+PARAMETER top_k 20
+PARAMETER top_p 0.95

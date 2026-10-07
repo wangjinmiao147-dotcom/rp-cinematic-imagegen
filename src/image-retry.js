@@ -15,9 +15,9 @@ export function createImageRetryCache() {
     };
 }
 
-export function imageRetrySignature({ sessionKey, messageIndex, message, dialogueHistory, participantContext,
+export function imageRetrySignature({ sessionKey, messageIndex, message, sourceHistory, dialogueHistory, participantContext,
     character, characterAnchor, previousGenerated, settings, shotMode, promptFormat, presetPrompt, presetAvoid, generationMeta }) {
-    return JSON.stringify({ sessionKey, messageIndex, message: [message.mes, message.swipe_id, message.send_date],
+    return JSON.stringify({ stateProtocol: 3, sessionKey, messageIndex, sourceHistory, message: [message.mes, message.swipe_id, message.send_date],
         dialogueHistory, participantContext, character: [character?.avatar, character?.name, character?.data?.description || character?.description], characterAnchor,
         previousGenerated, shotMode, promptFormat,
         // Endpoint/key/image-model repairs must not force another round of text calls.

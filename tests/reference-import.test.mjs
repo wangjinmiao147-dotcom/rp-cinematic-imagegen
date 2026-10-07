@@ -15,7 +15,7 @@ test('actual JPEG bytes take precedence over wrong provider MIME',async()=>{
 test('JSON reference archives remain importable',async()=>{
     const dataUrl=`data:image/png;base64,${png.toString('base64')}`;
     const refs=await readReferenceImport(file(JSON.stringify({format:'rpig-references',version:1,views:[{label:'saved',dataUrl}]}),'refs.json'),convert);
-    assert.deepEqual(refs,[{label:'saved',dataUrl}]);
+    assert.deepEqual(refs,[{label:'saved',dataUrl,isPrimaryIdentity:false,viewType:'single',enabled:true}]);
 });
 test('renaming text to jpg does not import text as an image',async()=>{
     await assert.rejects(readReferenceImport(file('not an image','photo.jpg','image/jpeg'),convert),{code:'REFERENCE_IMPORT_INVALID'});

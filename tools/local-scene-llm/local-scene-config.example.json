@@ -1,0 +1,19 @@
+{
+  "model": "rp-scene-qwen35-9b",
+  "listenPort": 11436,
+  "ollamaUrl": "http://127.0.0.1:11434",
+  "numGpu": 21,
+  "numThread": 6,
+  "numBatch": 32,
+  "numCtx": 16384,
+  "numPredict": 3072,
+  "temperature": 0.3,
+  "think": false,
+  "maxStageSeconds": 180,
+  "startTemperatureC": 72,
+  "finishTemperatureC": 75,
+  "abortTemperatureC": 85,
+  "maxGpuUsedMiB": 5120,
+  "minSystemFreeGiB": 1.5,
+  "allowedOrigins": ["http://127.0.0.1:8000", "http://localhost:8000"]
+}

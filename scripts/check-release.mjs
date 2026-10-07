@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {publicSourceFiles,auditPublicFiles} from './public-files.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const errors = [];
@@ -11,6 +12,13 @@ const read = (relativePath) => readFileSync(join(root, relativePath), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
 const pkg = JSON.parse(read('package.json'));
 const installerPath = 'installers/rp-cinematic-imagegen-tavern-helper-installer.json';
+const releaseFiles=JSON.parse(read('scripts/release-manifest.json'));
+const localPackage=JSON.parse(read('tools/local-scene-llm/package.json'));
+if(localPackage.version!==pkg.version)errors.push('Optional service version differs from the extension');
+if(!read('README.md').includes(`**v${pkg.version}**`))errors.push('README version differs from the release');
+if(!existsSync(join(root,`docs/RELEASE_v${pkg.version}.md`)))errors.push('Versioned Release notes are missing');
+for(const file of [...releaseFiles.extensionFiles,...releaseFiles.localServiceFiles.map(f=>'tools/local-scene-llm/'+f)])if(!existsSync(join(root,file)))errors.push(`Release input is missing: ${file}`);
+for(const issue of auditPublicFiles(root,publicSourceFiles(root)))errors.push(`${issue.file}: ${issue.risk}`);
 
 for (const field of ['display_name', 'loading_order', 'requires', 'optional', 'js', 'css', 'author', 'version', 'description']) {
     if (manifest[field] === undefined || manifest[field] === null || manifest[field] === '') {
