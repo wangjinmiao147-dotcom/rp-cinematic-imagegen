@@ -40,4 +40,4 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --title "RP 电影配图 ${{ github.ref_name }}" --notes-file "docs/RELEASE_${{ github.ref_name }}.md" --verify-tag
+        run: ./scripts/publish-release.ps1 -Tag "${{ github.ref_name }}"
