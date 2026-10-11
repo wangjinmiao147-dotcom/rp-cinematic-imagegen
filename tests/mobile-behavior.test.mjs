@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateImage, generateOpenAIImage, hydrateReferenceImages } from '../src/backends.js';
 import { callLLM } from '../src/llm.js';
-import { fetchToDataUrl, requestFailure, RpigError, timeoutSignal, combineAbortSignals } from '../src/utils.js';
+import { fetchToDataUrl, requestFailure, RpigError, timeoutSignal, combineAbortSignals, isAbortError, createAbortError } from '../src/utils.js';
 import { persistMediaUrl } from '../src/gallery.js';
 import { clampFloatingPoint, initializeFloatingUI, placeFloatingElement, viewportBounds } from '../src/floating-ui.js';
 import { exportReferenceArchive, parseReferenceArchive } from '../src/reference-transfer.js';
@@ -105,6 +105,21 @@ test('portable archive embeds bytes, omits URLs/extra settings, rejects URL-only
 test('network diagnostics redact keys and URL query credentials', () => {
     const error=requestFailure(new TypeError('Failed private-key-value'), 'https://api.test/edits?token=secret', 'edits', ['private-key-value']);
     assert.equal(error.message.includes('private-key-value'),false);assert.equal(error.message.includes('token=secret'),false);
+});
+
+test('native request timeouts remain transport failures while explicit abort conventions remain cancellations', async () => {
+    const timed = timeoutSignal(1);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(timed.reason.name, 'TimeoutError');
+    assert.equal(isAbortError(timed.reason), false);
+    assert.equal(requestFailure(timed.reason, 'https://api.test/history', 'poll').code, 'REQUEST_TIMEOUT');
+    assert.equal(isAbortError(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })), false);
+    for (const error of [createAbortError(), new DOMException('Source message changed', 'AbortError'),
+        new Error('The operation was aborted'), new Error('任务已取消'), new Error('AbortError: request cancelled')]) {
+        assert.equal(isAbortError(error), true);
+        assert.strictEqual(requestFailure(error, 'https://api.test/history', 'poll'), error);
+    }
+    assert.equal(isAbortError(new TypeError('Failed to fetch')), false);
 });
 
 test('older WebView without AbortSignal.timeout/any preserves timeout and cancellation', async t => {

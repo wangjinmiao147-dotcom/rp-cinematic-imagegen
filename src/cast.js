@@ -1,6 +1,8 @@
 function cleanCastName(value) {
     return String(value || '')
-        .replace(/^[-*\d.\s]+/, '')
+        // Strip a list marker only when it is separated from the actual name.
+        // Leading digits are part of valid identities such as 2B and 9S.
+        .replace(/^\s*(?:[-*]\s+|\d+[.)]\s+)/, '')
         .replace(/[\[\]"']/g, '')
         .trim();
 }

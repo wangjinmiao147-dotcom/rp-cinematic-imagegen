@@ -1,10 +1,10 @@
-# RP 电影配图 v2.9.57：按剧情和人物参考图生成配图，可选本地文字回退
+# RP 电影配图 v2.9.61：维护修复与一键错误报告
 
 这是一个 MIT 开源的 SillyTavern 前端扩展。先提取当前剧情事实，核对实际入镜人物、动作归属和空间关系，再生成英文图像编辑指令；结合每个人物自己的参考图生成剧照、表情特写和角色设计图。
 
 仓库：[RP 电影配图](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen)
 
-下载：[v2.9.57 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.57)
+下载：[v2.9.61 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.61)
 
 ![公开演示工作台](images/public-workbench-v2.9.57.png)
 
@@ -20,6 +20,8 @@
 
 ## 主要功能
 
+- 一键导出本地错误报告，默认不包含剧情、提示词、角色名、密钥、接口地址或图片，文字诊断需手动勾选。
+- 修复并发图库保存、参考图用途、消息来源失效、自动检测竞态以及 ComfyUI/Gemini 错误处理；生成入口共用可取消队列。
 - 只把有身体入镜依据的人物放进画面；仅被提及或在画外的人物不自动加进来。
 - 区分别名与独立人物，各用自己的参考图；User 三视图 / 多视角参考与角色卡分库。
 - 参考图提供身份和画风，当前动作、服装、道具和机位来自剧情；生成前可检查名单和提示词。
@@ -41,4 +43,4 @@
 
 图像与文字模型仍可能失败。限定镜面和姿态引导不能保证所有镜面、手部、持物或多人场景都正确；本地回退也不保证任何输入都能完成。自动化测试不代表所有手机实机验证。发布包不包含私人配置、聊天、角色卡、生成图、模型权重或缓存。
 
-问题反馈请附版本、后端、可公开复现步骤和错误码，先删除密钥及私人剧情。详细限制见 [README](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen#readme)。
+问题反馈可附设置页或悬浮工作台导出的错误报告和可公开复现步骤。报告默认省略私人文字；如手动附带文字诊断，请检查内容后再分享。详细限制见 [README](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen#readme)。

@@ -112,11 +112,6 @@ async function gallerySave(snapshot, entry, deps) {
         throw new RpigError('LOCAL_DETAIL_GALLERY_SAVE_FAILED', '没有可保存到的角色图库');
     }
     const save = deps.saveToGallery || defaultSaveToGallery;
-    // The existing gallery API intentionally no-ops without IndexedDB. An explicit
-    // "save candidate" must report that condition instead of claiming success.
-    if (save === defaultSaveToGallery && typeof indexedDB === 'undefined') {
-        throw new RpigError('LOCAL_DETAIL_GALLERY_SAVE_FAILED', '当前环境无法保存角色图库');
-    }
     if (await save(snapshot.character, entry) === false) {
         throw new RpigError('LOCAL_DETAIL_GALLERY_SAVE_FAILED', '局部精修候选未保存到角色图库');
     }
@@ -164,6 +159,7 @@ export function saveLocalDetailCandidate(snapshot, candidate, deps = {}) {
                 throwIfAborted(signal);
             }
             url = await (deps.persistMediaUrl || defaultPersistMediaUrl)(input, snapshot.character?.name || String(snapshot.character || 'character'), {
+                signal,
                 saveBase64AsFile: deps.saveBase64AsFile,
                 fetchToDataUrl: typeof fetchImage === 'function' ? value => fetchImage(value, { signal }) : undefined,
             });

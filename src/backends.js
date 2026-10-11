@@ -54,6 +54,13 @@ function localDetailPatchSize(value) {
 
 function isGeminiImageModel(model) { return /(?:^|\/)gemini-[\w.-]*image[\w.-]*$/i.test(model || ''); }
 
+// Message edits do not necessarily abort the request signal. Callers can supply
+// a synchronous source check so every adapter rechecks after asynchronous work.
+function ensureGenerationSource(options = {}) {
+    throwIfAborted(options.signal);
+    options.assertSourceValid?.();
+}
+
 async function declaredGeminiProtocol(settings, options) {
     const base = normalizeBackendUrl(settings.backendUrl);
     try {
@@ -85,6 +92,7 @@ export function extractChatImage(data) {
 }
 
 export async function generateOpenAIChatImage(settings, prompt, aspectRatio, refs, options = {}) {
+    ensureGenerationSource(options);
     const base = normalizeBackendUrl(settings.backendUrl);
     const model = settings.backendModel.trim();
     const key = (settings.backendKey || '').trim();
@@ -101,6 +109,7 @@ export async function generateOpenAIChatImage(settings, prompt, aspectRatio, ref
     const url = `${base}/chat/completions`;
     let response;
     try {
+        ensureGenerationSource(options);
         response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
             body: JSON.stringify({ model, stream: false, modalities: ['text', 'image'], messages: [{ role: 'user', content }] }),
             signal: combineAbortSignals(options.signal, timeoutSignal(300000)) });
@@ -121,7 +130,11 @@ export async function generateOpenAIChatImage(settings, prompt, aspectRatio, ref
  */
 async function computeDataUrlHash(dataUrl) {
     const bytes = Uint8Array.from(atob(dataUrl.split(',')[1]), c => c.charCodeAt(0));
-    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    // SubtleCrypto is unavailable when Tavern is opened over LAN HTTP. The hash
+    // is diagnostic metadata; reference bytes and identity checks remain usable.
+    const subtle = globalThis.crypto?.subtle;
+    if (typeof subtle?.digest !== 'function') return null;
+    const digest = await subtle.digest('SHA-256', bytes);
     return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -130,7 +143,11 @@ export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, max
     const hydrated = [];
     const seenDataUrlMap = new Map();
 
-    for (const ref of refs) {
+    // Select the explicit primary before removing same-image supporting views.
+    // Otherwise a supporting record can erase the primary role before sorting.
+    const orderedRefs = [...refs].sort((a, b) => Number((b?.role || b?.kind) === 'identity-primary')
+        - Number((a?.role || a?.kind) === 'identity-primary'));
+    for (const ref of orderedRefs) {
         throwIfAborted(signal);
         if (!ref) throw new RpigError('REFERENCE_MISSING', '参考图记录为空，已停止，未跳过身份资料');
 
@@ -199,19 +216,13 @@ export async function hydrateReferenceImages(refs, fetchFn = fetchToDataUrl, max
         });
     }
 
-    // 确定最终图片顺序：主身份图优先（按 character -> user），随后是辅助图
-    hydrated.sort((a, b) => {
-        const aIsPrimary = a.role === 'identity-primary' || a.kind === 'identity-primary';
-        const bIsPrimary = b.role === 'identity-primary' || b.kind === 'identity-primary';
-        if (aIsPrimary && !bIsPrimary) return -1;
-        if (!aIsPrimary && bIsPrimary) return 1;
-        return 0;
-    });
-
     // 按最终顺序生成编号和身份映射，并计算哈希
     for (const [index, ref] of hydrated.entries()) {
+        throwIfAborted(signal);
         ref.referenceIndex = index + 1;
-        ref.hash = await computeDataUrlHash(ref.dataUrl);
+        try { ref.hash = await computeDataUrlHash(ref.dataUrl); }
+        catch (error) { throw new RpigError('REFERENCE_INVALID', `参考图数据无法解码 [${ref.label || '未知'}]：${error.message}`); }
+        throwIfAborted(signal);
     }
 
     // 将最终经过读取、去重与编号的参考图同步回全链路诊断
@@ -238,7 +249,7 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
     const onWarning = options.onWarning || (() => {});
     const fetchFn = options.fetchToDataUrl || fetchToDataUrl;
 
-    throwIfAborted(options.signal);
+    ensureGenerationSource(options);
     if (s.stylePreset === 'reference') {
         if (!refs?.length || refs.every(ref => ref.kind === 'continuity')) {
             throw new RpigError('IDENTITY_REFERENCE_REQUIRED', '参考图驱动需要该入镜人物的身份参考图；未找到原图，已停止以避免重新设计人物');
@@ -251,6 +262,7 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
         omitted:(refs || []).filter(r => !selectedRefs.includes(r)).map(r => ({identityName:r.identityName, label:r.label, reason:'supporting costume view omitted from story request'})),
     };
     const hydratedRefs = await hydrateReferenceImages(selectedRefs, fetchFn, selectedRefs?.length || 0, options.signal, options.diagnostics, onWarning);
+    ensureGenerationSource(options);
     if (s.stylePreset === 'reference' && !hydratedRefs.some(ref => (ref.role || ref.kind) === 'identity-primary')) {
         throw new RpigError('IDENTITY_REFERENCE_REQUIRED', '身份主图未成功读取，已停止生图');
     }
@@ -354,7 +366,7 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
 /** Edit one explicitly selected crop; the caller owns source-image preservation
  * and mask compositing. This never invokes ordinary story analysis or templates. */
 export async function generateLocalDetailEdit(settings, instruction, patchDataUrl, options = {}) {
-    throwIfAborted(options.signal);
+    ensureGenerationSource(options);
     if (!isLocalQwen(settings)) throw new RpigError('DETAIL_LOCAL_BACKEND_REQUIRED', '选区编辑目前仅支持本地千问桥接');
     assertUsableInstruction(instruction, '选区编辑指令');
     const patchSize = localDetailPatchSize(options.patchSize);
@@ -394,6 +406,7 @@ export async function generateLocalDetailEdit(settings, instruction, patchDataUr
  * OpenAI 兼容图像生成后端
  */
 export async function generateOpenAIImage(settings, prompt, size, refs, options = {}) {
+    ensureGenerationSource(options);
     const base = normalizeBackendUrl(settings.backendUrl);
     const model = (settings.backendModel || 'gpt-image-1').trim();
     const key = (settings.backendKey || '').trim();
@@ -446,12 +459,15 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
                 if (highFidelity) formData.append('input_fidelity', 'high');
                 return formData;
                 };
-                const requestEdit = (highFidelity) => fetch(`${base}/images/edits`, {
+                const requestEdit = (highFidelity) => {
+                    ensureGenerationSource(options);
+                    return fetch(`${base}/images/edits`, {
                     method: 'POST',
                     headers: headers,
                     body: buildEditForm(highFidelity),
                     signal: combineAbortSignals(options.signal, timeoutSignal(300000)),
-                });
+                    });
+                };
 
                 // 连续性模式优先请求高输入保真；第三方不识别该字段时自动重试标准 edits。
                 let res = await requestEdit(shouldUseHighFidelity);
@@ -499,6 +515,7 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
 
     let res;
     try {
+        ensureGenerationSource(options);
         res = await fetch(`${base}/images/generations`, {
             method: 'POST',
             headers: jsonHeaders,
@@ -534,6 +551,7 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
  * Google Gemini 图像生成后端（符合当前官方 Generate Content REST 规范）
  */
 export async function generateGeminiImage(settings, prompt, aspectRatio, refs, options = {}) {
+    ensureGenerationSource(options);
     let base = normalizeBackendUrl(settings.backendUrl, 'https://generativelanguage.googleapis.com/v1');
     // New API deployments expose the native Gemini route under /v1beta even
     // when the same server's OpenAI-compatible base is /v1.
@@ -678,7 +696,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
         options.diagnostics.requestedSize = isLocalBridge ? [requestBody.width, requestBody.height] : null;
         options.diagnostics.requestedAspectRatio = settings.imageSize || aspectRatio;
     }
-    const url = `${base}/models/${encodeURIComponent(model)}:generateContent`;
+    const url = `${base}/models/${encodeURIComponent(model.replace(/^models\//, ''))}:generateContent`;
 
     const cancelLocal = () => {
         if (isLocalBridge && options.requestId) {
@@ -690,6 +708,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
 
     let res;
     try {
+        ensureGenerationSource(options);
         res = await fetch(url, {
             method: 'POST',
             headers: headers,
@@ -724,6 +743,9 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
 
     const b64 = imagePart.inlineData?.data || imagePart.inline_data?.data;
     const mime = imagePart.inlineData?.mimeType || imagePart.inline_data?.mime_type || 'image/png';
+    if (typeof b64 !== 'string' || !b64.trim() || !/^image\/[\w.+-]+$/i.test(mime)) {
+        throw new RpigError(isLocalBridge ? 'QWEN_IMAGE_INVALID' : 'GEMINI_IMAGE_INVALID', `${backendLabel} 返回的图片数据为空或格式无效`);
+    }
     return { dataUrl: `data:${mime};base64,${b64}`, model, usedRefs: Array.isArray(refs) && refs.length > 0 };
 }
 
@@ -731,6 +753,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
  * Stable Diffusion WebUI 后端
  */
 export async function generateSDImage(settings, prompt, avoid, sdSize, refs, options = {}) {
+    ensureGenerationSource(options);
     const base = normalizeBackendUrl(settings.backendUrl);
     const [width, height] = sdSize || [1344, 768];
     const negative = avoid || settings.sdNegative || DEFAULT_SD_NEGATIVE;
@@ -788,6 +811,7 @@ export async function generateSDImage(settings, prompt, avoid, sdSize, refs, opt
  * ComfyUI 后端（严格节点解析与防多节点覆盖）
  */
 export async function generateComfyUIImage(settings, prompt, avoid, refs, options = {}) {
+    ensureGenerationSource(options);
     const base = normalizeBackendUrl(settings.backendUrl);
     const workflowRaw = (settings.comfyWorkflow || '').trim();
     if (!workflowRaw) {
@@ -801,35 +825,8 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
         throw new Error('ComfyUI workflow JSON 格式无效，解析失败');
     }
 
-    // 1. 上传参考图
-    const uploadedNames = [];
     let appliedReference = false;
-    if (Array.isArray(refs) && refs.length > 0) {
-        // 当前仅绑定一个 LoadImage 节点，上传第一张最高优先级参考图即可。
-        for (const ref of refs.slice(0, 1)) {
-            if (!ref?.dataUrl) continue;
-            try {
-                const blob = dataUrlToBlob(ref.dataUrl);
-                const form = new FormData();
-                form.append('image', blob, `ref_${Date.now()}.png`);
-                form.append('overwrite', 'true');
-                const res = await fetch(`${base}/upload/image`, {
-                    method: 'POST',
-                    body: form,
-                    signal: combineAbortSignals(options.signal, timeoutSignal(30000)),
-                });
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data?.name) uploadedNames.push(data.name);
-                }
-            } catch (error) {
-                if (isAbortError(error)) throw error;
-                /* ignore single ref upload fail */
-            }
-        }
-    }
-
-    // 2. 严格匹配正向/负向提示词节点
+    // 1. 严格匹配正向/负向提示词节点，在上传之前核验工作流。
     let posNode = null;
     let negNode = null;
 
@@ -886,13 +883,26 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
         throw new Error('正向提示词节点输入结构无效');
     }
 
-    posNode.inputs.text = prompt;
-    if (negNode && negNode.inputs && typeof negNode.inputs.text !== 'undefined' && avoid) {
-        negNode.inputs.text = avoid;
+    // A supplied positive ID must not prevent discovery of a uniquely labeled
+    // negative node. Ambiguous negative nodes still require an explicit ID.
+    if (!negNode) {
+        const candidates = Object.values(workflow).filter(node => node !== posNode
+            && typeof node?.inputs?.text === 'string'
+            && /neg|负向|avoid|negative/i.test(node._meta?.title || ''));
+        if (candidates.length === 1) negNode = candidates[0];
+    }
+    if (negNode === posNode) throw new RpigError('COMFY_PROMPT_NODE_CONFLICT', '正向与负向提示词不能使用同一个节点');
+    if (negNode && typeof negNode?.inputs?.text === 'undefined') {
+        throw new RpigError('COMFY_NEGATIVE_NODE_INVALID', '负向提示词节点输入结构无效');
     }
 
-    // 3. 严格匹配 LoadImage 节点（禁止全量无条件覆盖全部 LoadImage 节点）
+    posNode.inputs.text = prompt;
+    if (negNode) negNode.inputs.text = avoid || '';
+
+    // 2. 严格匹配 LoadImage 节点，然后上传；不得沿用工作流里的旧图。
     if (Array.isArray(refs) && refs.length > 0) {
+        if (refs.length > 1) throw new RpigError('MULTI_REFERENCE_UNSUPPORTED', 'ComfyUI 当前仅支持一张参考图，已停止，未截断参考图');
+        if (!refs[0]?.dataUrl) throw new RpigError('REFERENCE_MISSING', 'ComfyUI 参考图尚未读取，已停止');
         let imgNode = null;
         if (settings.comfyImageNodeId) {
             if (!workflow[settings.comfyImageNodeId]) {
@@ -919,13 +929,33 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
             }
         }
 
-        if (imgNode && imgNode.inputs && imgNode.inputs.image !== undefined && uploadedNames.length > 0) {
-            imgNode.inputs.image = uploadedNames[0];
-            appliedReference = true;
+        if (!imgNode || typeof imgNode?.inputs?.image === 'undefined') {
+            throw new RpigError('COMFY_REFERENCE_NODE_INVALID', '工作流没有可用的参考图输入节点，已停止，未丢弃参考图');
         }
+        let uploaded;
+        try {
+            ensureGenerationSource(options);
+            const form = new FormData();
+            form.append('image', dataUrlToBlob(refs[0].dataUrl), `ref_${Date.now()}.png`);
+            form.append('overwrite', 'true');
+            const response = await fetch(`${base}/upload/image`, { method: 'POST', body: form,
+                signal: combineAbortSignals(options.signal, timeoutSignal(30000)) });
+            if (!response.ok) throw new RpigError('COMFY_REFERENCE_UPLOAD_HTTP',
+                `参考图上传 HTTP ${response.status}: ${upstreamErrorMessage(await response.text(), [settings.backendKey])}`, { status: response.status });
+            uploaded = await response.json();
+            ensureGenerationSource(options);
+            if (typeof uploaded?.name !== 'string' || !uploaded.name.trim()) {
+                throw new RpigError('COMFY_REFERENCE_UPLOAD_EMPTY', '参考图上传未返回文件名，已停止');
+            }
+        } catch (error) {
+            throw requestFailure(error, `${base}/upload/image`, 'ComfyUI 参考图上传失败，已停止', [settings.backendKey]);
+        }
+        imgNode.inputs.image = uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
+        appliedReference = true;
     }
 
-    // 4. 提交任务
+    // 3. 提交任务
+    ensureGenerationSource(options);
     const res = await fetch(`${base}/prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -935,29 +965,39 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
 
     if (!res.ok) {
         const errText = await res.text().catch(() => '');
-        throw new Error(`ComfyUI HTTP ${res.status}: ${errText.slice(0, 300)}`);
+        throw new Error(`ComfyUI HTTP ${res.status}: ${upstreamErrorMessage(errText, [settings.backendKey])}`);
     }
 
     const data = await res.json();
+    ensureGenerationSource(options);
     const promptId = data?.prompt_id;
     if (!promptId) throw new Error('ComfyUI 未返回 prompt_id');
 
-    // 5. 轮询历史结果
-    for (let i = 0; i < 120; i++) {
-        await sleep(2500, options.signal);
+    // 4. 总轮询期限包含网络耗时，避免 120 次慢请求把 300 秒拖到 25 分钟。
+    const deadline = Date.now() + 300000;
+    while (Date.now() < deadline) {
+        await sleep(Math.min(2500, deadline - Date.now()), options.signal);
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
         let hres;
         try {
+            ensureGenerationSource(options);
             hres = await fetch(`${base}/history/${promptId}`, {
-                signal: combineAbortSignals(options.signal, timeoutSignal(10000)),
+                signal: combineAbortSignals(options.signal, timeoutSignal(Math.min(10000, remaining))),
             });
         } catch (error) {
-            if (isAbortError(error) && options.signal?.aborted) throw error;
+            if (isAbortError(error)) throw error;
             continue;
         }
         if (!hres.ok) continue;
 
         const hist = await hres.json();
+        ensureGenerationSource(options);
         const entry = hist[promptId];
+        if (entry?.status?.status_str === 'error') {
+            const failure = entry.status.messages?.find(message => Array.isArray(message) && message[0] === 'execution_error')?.[1];
+            throw new RpigError('COMFY_EXECUTION_FAILED', `ComfyUI 执行失败：${scrubSensitiveText(failure?.exception_message || '请检查 ComfyUI 控制台与工作流节点', [settings.backendKey]).slice(0, 300)}`);
+        }
         if (!entry || !entry.outputs) continue;
 
         for (const nodeId in entry.outputs) {
@@ -972,6 +1012,9 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
                 };
             }
         }
+        if (entry.status?.completed === true) {
+            throw new RpigError('COMFY_IMAGE_EMPTY', 'ComfyUI 任务已完成，但没有返回图片输出');
+        }
     }
     throw new Error('ComfyUI 生成超时（300s）');
 }
@@ -980,6 +1023,7 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
  * SillyTavern 内置 SD 命令
  */
 export async function generateTavernSD(prompt, slashCommandParser, options = {}) {
+    ensureGenerationSource(options);
     const parser = slashCommandParser || (typeof window !== 'undefined' ? window.SlashCommandParser : null);
     if (!parser?.commands?.['sd']) {
         throw new Error('酒馆未启用内置 sd 命令，请先在 酒馆扩展→图像生成 中配置好生图 API');

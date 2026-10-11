@@ -226,6 +226,9 @@ export function createAbortError(message = '任务已取消') {
 }
 
 export function isAbortError(error) {
+    // A native timeout may say "aborted due to timeout"; it remains a request
+    // failure, not user cancellation, and polling can retry it within its deadline.
+    if (error?.name === 'TimeoutError') return false;
     return error?.name === 'AbortError' || /任务已取消|aborted|aborterror/i.test(error?.message || '');
 }
 

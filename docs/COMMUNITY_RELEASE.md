@@ -8,10 +8,10 @@
 2. 使用明确清单审查公开源码、测试、文档；排除私人配置、聊天、角色卡、验收日志、权重和node_modules。测试使用虚构夹具。
 3. 执行 `npm ci`、`npm run check`、`npm test`、`npm ci --prefix tools/local-scene-llm`、`npm run test:local`、`npm run build`。检查ZIP内容、导入、文档、默认值和SHA256。
 4. 按审查清单暂存并检查 `git diff --cached`，提交后推送main，确认该提交的Windows / Node20 CI通过。
-5. 再建立 `v2.9.57` 标签并推送；标签自动创建公开Release，不与CI同时手动重复创建。
+5. 再建立 `v2.9.61` 标签并推送；标签自动创建公开Release，不与CI同时手动重复创建。
 6. 校验Release六个附件、对应SHA256、安装链接和源码提交。不同版本的旧包保留。
 
-基础扩展、酒馆助手安装器、可选本地服务分别分发；基础扩展不要求本地9B模型。通用中文稿见 [COMMUNITY_POST.zh-CN.md](COMMUNITY_POST.zh-CN.md)，Release说明见 [RELEASE_v2.9.57.md](RELEASE_v2.9.57.md)。社区账号和具体位置由发布者选择。
+基础扩展、酒馆助手安装器、可选本地服务分别分发；基础扩展不要求本地9B模型。通用中文稿见 [COMMUNITY_POST.zh-CN.md](COMMUNITY_POST.zh-CN.md)，Release说明见 [RELEASE_v2.9.61.md](RELEASE_v2.9.61.md)。社区账号和具体位置由发布者选择。
 
 ## 官方扩展索引
 

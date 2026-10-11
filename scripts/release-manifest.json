@@ -37,15 +37,22 @@
     "src/local-detail.js",
     "src/mirror-layout.js",
     "src/pose-layout.js",
+    "src/overlay-lifecycle.js",
     "src/prompts.js",
     "src/qwen.js",
     "src/reference-transfer.js",
+    "src/reference-state.js",
     "src/scene-output.js",
     "src/scene-prompt-library.js",
     "src/scene-state.js",
     "src/story-text.js",
+    "src/task-context.js",
     "src/utils.js",
-    "src/visual-constraints.js"
+    "src/visual-constraints.js",
+    "docs/RELEASE_v2.9.60.md",
+    "src/diagnostic-report.js",
+    "src/diagnostic-text.js",
+    "docs/RELEASE_v2.9.61.md"
   ],
   "localServiceFiles": [
     "local-scene-llm.mjs",

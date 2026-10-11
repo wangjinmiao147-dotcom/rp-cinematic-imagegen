@@ -2,13 +2,14 @@
 // RP 电影配图 - 自动检测模块
 // ============================================================
 
-import { extractJson, scrubSensitiveText, RpigError } from './utils.js';
+import { extractJson, scrubSensitiveText, RpigError, createAbortError, isAbortError, raceWithAbort } from './utils.js';
 import { buildDirectorPrompt, buildDialogueContext } from './prompts.js';
 import { assertUsableInstruction } from './analysis-validation.js';
+import { persistGenerationDiagnostics } from './diagnostics.js';
 
 // 记录各会话最后检测的消息下标（按会话隔离）
 const lastDetectedIndexByChat = new Map();
-// 记录各会话的正在检测状态（按会话隔离）
+// 存储每次检测的独立运行对象；旧请求只能清理自身，不能释放新请求的锁。
 const autoDetectBusyByChat = new Map();
 
 /**
@@ -61,9 +62,13 @@ export function getChatSessionKey(context) {
  */
 export function resetAutoDetectState(chatKey) {
     if (chatKey) {
+        autoDetectBusyByChat.get(chatKey)?.controller.abort(createAbortError('自动检测已重置'));
         lastDetectedIndexByChat.delete(chatKey);
         autoDetectBusyByChat.delete(chatKey);
     } else {
+        for (const run of autoDetectBusyByChat.values()) {
+            run.controller.abort(createAbortError('会话已切换，自动检测已中止'));
+        }
         lastDetectedIndexByChat.clear();
         autoDetectBusyByChat.clear();
     }
@@ -124,7 +129,11 @@ export async function executeAutoDetection({
     const initialMes = initialMessage?.mes;
     const initialSwipeId = initialMessage?.swipe_id !== undefined ? initialMessage.swipe_id : null;
 
+    const run = { controller: new AbortController(), timestamp: new Date().toISOString(),
+        requestId: `rpig_auto_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, backend: settings.backend };
+    const diagnosticKeys = [settings.backendKey, settings.llmKey, settings.finalLlmKey].filter(Boolean);
     const isContextStillValid = () => {
+        if (run.controller.signal.aborted || autoDetectBusyByChat.get(initialSessionKey) !== run) return false;
         const cur = typeof getContextFn === 'function' ? getContextFn() : null;
         if (!cur) return false;
         if (getChatSessionKey(cur) !== initialSessionKey) return false;
@@ -136,7 +145,7 @@ export async function executeAutoDetection({
         return true;
     };
 
-    autoDetectBusyByChat.set(initialSessionKey, true);
+    autoDetectBusyByChat.set(initialSessionKey, run);
     lastDetectedIndexByChat.set(initialSessionKey, messageIndex);
 
     try {
@@ -159,16 +168,17 @@ export async function executeAutoDetection({
             onStatusChange('working', '🤖 正在分析对话剧情与场景事件…');
         }
 
-        const rawLLM = await callLLMFn(system, userText, settings, getContextFn);
+        const rawLLM = await raceWithAbort(callLLMFn(system, userText, settings, getContextFn, {
+            signal: run.controller.signal,
+            jsonMode: true,
+        }), run.controller.signal);
 
         // LLM 返回后立即验证会话是否发生切换
         if (!isContextStillValid()) {
-            if (typeof onNotify === 'function') {
-                onNotify('info', '会话已切换，已中止自动配图生成');
-            }
-            if (typeof onStatusChange === 'function') {
-                onStatusChange('idle', '');
-            }
+            return;
+        }
+        if (settings.autoMode !== true) {
+            onStatusChange?.('idle', '');
             return;
         }
 
@@ -221,12 +231,18 @@ export async function executeAutoDetection({
             });
         }
     } catch (err) {
-        const msg = scrubSensitiveText(err.message || String(err));
+        if (isAbortError(err) || !isContextStillValid()) return;
+        const msg = scrubSensitiveText(err.message || String(err), diagnosticKeys);
+        persistGenerationDiagnostics({ requestId: run.requestId, mode: 'auto-detect', stage: 'facts',
+            status: 'failed', backend: run.backend, timestamp: run.timestamp, finishedAt: new Date().toISOString(),
+            errorCode: err.code || null, error: msg }, diagnosticKeys);
         console.error('[RP 电影配图] 自动检测异常:', msg);
         if (typeof onStatusChange === 'function') {
             onStatusChange('error', `自动检测失败: ${msg}`);
         }
     } finally {
-        autoDetectBusyByChat.delete(initialSessionKey);
+        if (autoDetectBusyByChat.get(initialSessionKey) === run) {
+            autoDetectBusyByChat.delete(initialSessionKey);
+        }
     }
 }

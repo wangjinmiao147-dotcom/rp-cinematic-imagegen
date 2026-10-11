@@ -15,6 +15,24 @@ const castContext = {
   focalCharacter: { name: '女1' },
 };
 
+test('numeric character identities survive list normalization and card matching', () => {
+  const first = { name: '2B', avatar: '2B.png' };
+  const second = { name: '9S', avatar: '9S.png' };
+  const names = normalizeCastCharacters(['2B', '9S', '3.14', '-Name'], { fallbackToFocal: false });
+  assert.deepEqual(names, ['2B', '9S', '3.14', '-Name']);
+  const plan = resolveCastReferencePlan(names.slice(0, 2), { characters: [first, second] });
+  assert.equal(plan[0].character, first);
+  assert.equal(plan[1].character, second);
+});
+
+test('numbered and bullet list markers are removed without consuming identity digits', () => {
+  assert.deepEqual(
+    normalizeCastCharacters(['1. 人名', '1) 另一个人', '- 2B', '* 9S'], { fallbackToFocal: false }),
+    ['人名', '另一个人', '2B', '9S'],
+  );
+  assert.deepEqual(normalizeCastCharacters([], { focalCharacter: { name: '2B' } }), ['2B']);
+});
+
 test('a one-person LLM cast stays one-person instead of forcing user plus focal character', () => {
   assert.deepEqual(
     normalizeCastCharacters([{ canonical_name: '女1', presence_evidence: '女1独自留在房间里' }], castContext),

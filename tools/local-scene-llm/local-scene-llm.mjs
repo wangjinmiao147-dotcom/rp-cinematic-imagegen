@@ -101,6 +101,9 @@ export async function startServer(config,{sampleResources,ollamaFetch=fetch,list
             while(true){
                 if(controller.signal.aborted)throw Error(reason);
                 const current=await sample();
+                // Cancellation can arrive while the asynchronous resource
+                // sample is pending. Do not mark an unstarted task submitted.
+                if(controller.signal.aborted)throw Error(reason);
                 const failure=resourceFailure(current,config);if(failure)throw Error(failure);
                 if(current.temperatureC<=config.startTemperatureC&&current.usedMiB<2048)break;
                 await wait(1000);

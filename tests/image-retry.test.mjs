@@ -11,6 +11,7 @@ import {assembleUnifiedPrompt} from '../src/prompts.js';
 import {sanitizeDiagnostics} from '../src/diagnostics.js';
 import {resolveCastReferencePlan} from '../src/character-identities.js';
 import * as visualConstraints from '../src/visual-constraints.js';
+import * as taskContext from '../src/task-context.js';
 
 // Execute the actual task function with isolated host/API adapters. This checks
 // the production orchestration, including all three text stages and the review.
@@ -19,14 +20,18 @@ const resolveCharSource = source.slice(source.indexOf('async function resolveCha
 const resolveUserSource = source.slice(source.indexOf('async function resolveUserReferences('), source.indexOf('function migrateLegacyMedia('));
 const executeTaskSource = source.slice(source.indexOf('async function executeGenerationTask('), source.indexOf('\nasync function generateCharacterSheetFlow('));
 const taskSource = resolveCharSource + '\n' + resolveUserSource + '\n' + executeTaskSource;
-function fixture() {
+function fixture({ clock = null } = {}) {
     const message={mes:'The character sits at a desk.',send_date:'today',swipe_id:0};
     const character={name:'Test',avatar:'test.png',description:'A test character'};
     const settings={backend:'openai',backendUrl:'https://api.test/v1',backendModel:'image',shotMode:'snapshot',useCharacterImage:false,previewBeforeGeneration:true};
     const context={chat:[message],chatId:'chat-one',name1:'Player',saveChat:async()=>{}};
     const cache=createImageRetryCache();
     const state={textCalls:0,imageCalls:[],reviews:0,refReads:0,failImage:true,failText:false,failRefs:false,cancelImage:false,toasts:[]};
-    const dependencies={getCurrentWorldAgeContext,loadWorldInfo:async()=>state.worldBook||null,...utils,...sceneState,...qwen,...visualConstraints,parseAnalysisResponse,sanitizeDiagnostics,resolveCastReferencePlan,rpigImageRetryCache:cache,imageRetrySignature,getContext:()=>context,getChatSessionKey:c=>c.chatId,getSettings:()=>settings,
+    const RuntimeDate = clock ? class extends Date {
+        constructor(...args) { super(...(args.length ? args : [clock.now])); }
+        static now() { return clock.now; }
+    } : Date;
+    const dependencies={Date:RuntimeDate,getCurrentWorldAgeContext,loadWorldInfo:async()=>state.worldBook||null,...utils,...sceneState,...qwen,...visualConstraints,...taskContext,parseAnalysisResponse,sanitizeDiagnostics,resolveCastReferencePlan,rpigImageRetryCache:cache,imageRetrySignature,getContext:()=>context,getChatSessionKey:c=>c.chatId,getSettings:()=>settings,
         getAllCharacters:()=> (state.characters || [character]).map(c=>({name:c.name,avatar:c.avatar,raw:c})),
         getCharacterForMessage:()=>character,getCurrentCharacter:()=>character,getPreviousGeneratedImage:()=>null, DEFAULT_SD_NEGATIVE: 'negative', timeoutSignal: () => new AbortController().signal, throwIfAborted: (signal) => { if (signal?.aborted) throw new DOMException('Aborted', 'AbortError'); }, scrubSensitiveText: (text) => text, extractJson: (text) => JSON.parse(text),
         setGenStatus:()=>{},toastr:Object.fromEntries(['info','warning','success','error'].map(type=>[type,(message,_title,options)=>state.toasts.push({type,message,options})])),
@@ -62,10 +67,10 @@ function fixture() {
         parseDirectorLlmOutput:raw=>({json:JSON.parse(raw),finalPrompt:JSON.parse(raw).final_prompt}),normalizeCastCharacters:()=>state.visibleCharacters||['Test'],getFinalizerLlmSettings:s=>s,
         normalizeFinalPromptOutput:raw=>raw,collapsePromptToSingleParagraph:p=>p,enforceOmniscientEnsemble:p=>p,
         getCharacterAvatarDataUrl:async()=>{state.avatarReads=(state.avatarReads||0)+1;return null;},getCharacterAvatarInfo:()=>null,getCharacterIdentifier:c=>c?.avatar||c?.name||String(c),
-        getCharacterRefs:async target=>{state.refReads++;if(state.failRefs)throw new Error('reference read failed');return target==='user'?(state.userRefs||[]):(state.refsByCharacter?.[target?.avatar] || state.refs || []);},
+        getCharacterRefs:async target=>{state.refReads++;state.onRefs?.();if(state.failRefs)throw new Error('reference read failed');return target==='user'?(state.userRefs||[]):(state.refsByCharacter?.[target?.avatar] || state.refs || []);},
         buildSceneAwareImagePrompt:({basePrompt})=>basePrompt+' + reference instructions',
-        reviewFinalPrompt:async()=>{state.reviews++;return{confirmed:true,prompt:'User edited final prompt',avoid:'User edited negative'};},
-        generateImage:async(s,p,a,refs)=>{state.imageCalls.push({settings:{...s},prompt:p,avoid:a,refs});if(state.cancelImage)throw utils.createAbortError();if(state.failImage)throw new Error('image backend failed');return{dataUrl:'data:image/png;base64,YWJj',model:'image',usedRefs:true};},
+        reviewFinalPrompt:async()=>{state.reviews++;state.onReview?.();return{confirmed:true,prompt:'User edited final prompt',avoid:'User edited negative'};},
+        generateImage:async(s,p,a,refs)=>{state.imageCalls.push({settings:{...s},prompt:p,avoid:a,refs});state.onImage?.();if(state.cancelImage)throw utils.createAbortError();if(state.failImage)throw new Error('image backend failed');return{dataUrl:'data:image/png;base64,YWJj',model:'image',usedRefs:true};},
         fetchToDataUrl:async()=>'',SlashCommandParser:{},persistMediaUrl:async()=>'/saved.png',saveBase64AsFile:()=>{},migrateLegacyMedia:()=>{},
         $:()=>({addClass(){return this;}}),updateMessageBlock:()=>{},ensureFallbackMediaRender:()=>{},saveToGallery:async()=>{},
     };
@@ -84,6 +89,38 @@ test('image failure retries only images, preserving manual edits and skipping re
     assert.equal(f.state.imageCalls.length,2);assert.equal(f.state.imageCalls[1].prompt,'User edited final prompt');assert.equal(f.state.imageCalls[1].avoid,'User edited negative');
     assert.equal(f.state.imageCalls[1].settings.backendUrl,'https://fixed-api.test/v1');
     await f.run();assert.equal(f.state.textCalls,6,'success must clear the failed-attempt cache');
+});
+
+test('story diagnostics identify the actual task backend and preserve uncoded failures as null', async()=>{
+    const f=fixture();
+    assert.ok((await f.run()).error);
+    const failed=f.message.extra.rpigLastAttempt;
+    assert.equal(failed.mode,'story');
+    assert.equal(failed.backend,'openai');
+    assert.equal(failed.status,'failed');
+    assert.equal(failed.stage,'image-request');
+    assert.equal(failed.errorCode,null);
+    assert.ok(Date.parse(failed.finishedAt)>=Date.parse(failed.timestamp));
+    f.settings.backend='gemini';f.state.failImage=false;
+    assert.equal((await f.run()).success,true);
+    const completed=f.message.extra.rpigLastAttempt;
+    assert.equal(completed.mode,'story');
+    assert.equal(completed.backend,'gemini');
+    assert.equal(completed.status,'success');
+    assert.equal(completed.stage,'complete');
+    assert.equal(completed.errorCode,null);
+});
+
+test('story diagnostic duration includes text analysis before the image request', async()=>{
+    const start=Date.UTC(2026,9,12,1,0,0);
+    const clock={now:start};
+    const f=fixture({clock});
+    f.state.onFacts=()=>{clock.now+=3000;};
+    f.state.onImage=()=>{clock.now+=2000;};
+    assert.ok((await f.run()).error);
+    const diagnostic=f.message.extra.rpigLastAttempt;
+    assert.equal(Date.parse(diagnostic.timestamp),start);
+    assert.equal(Date.parse(diagnostic.finishedAt)-Date.parse(diagnostic.timestamp),5000);
 });
 
 test('actual orchestration carries verified current undress through a missing editor wardrobe sentence',async()=>{
@@ -234,4 +271,29 @@ test('the actual three-stage orchestration uses the current linked world age',as
     f.state.worldBook={entries:{3:{comment:'Test',content:'外表年龄: 18岁'}}};
     assert.equal((await f.run()).success,true);assert.match(f.state.textSystems[0],/18岁/);
     assert.match(f.state.relationDesign,/18岁/);assert.match(f.state.editorDesign,/18岁/);
+});
+test('editing the message while references load stops before the image request',async()=>{
+    const f=fixture();f.state.failImage=false;
+    f.state.onRefs=()=>{f.message.mes='A replacement story.';};
+    await f.run();
+    assert.equal(f.state.imageCalls.length,0);
+    assert.equal(f.message.extra?.media,undefined);
+});
+
+test('editing the message in the prompt review stops before the image request',async()=>{
+    const f=fixture();f.state.failImage=false;
+    f.state.onReview=()=>{f.message.swipe_id=1;};
+    await f.run();
+    assert.equal(f.state.reviews,1);
+    assert.equal(f.state.imageCalls.length,0);
+});
+
+test('changing backend settings during text analysis applies to the next task only',async()=>{
+    const f=fixture();
+    f.state.onFacts=()=>{f.settings.backendUrl='https://replacement.test/v1';};
+    await f.run();
+    assert.equal(f.state.imageCalls[0].settings.backendUrl,'https://api.test/v1');
+    f.state.failImage=false;
+    await f.run();
+    assert.equal(f.state.imageCalls[1].settings.backendUrl,'https://replacement.test/v1');
 });

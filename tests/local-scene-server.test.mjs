@@ -5,8 +5,8 @@ const config=loadConfig(new URL('../tools/local-scene-llm/local-scene-config.exa
 const sampleResources=async()=>({usedMiB:1000,freeMiB:5000,temperatureC:60,systemFreeGiB:8});
 const input={model:config.model,messages:[{role:'system',content:'Only JSON.'},{role:'user',content:'林岚在车站举手示意。'}],response_format:{type:'json_object'}};
 const json=value=>new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}});
-async function fixture(run,ollamaFetch=async()=>json({models:[]})){
-    const server=await startServer(config,{sampleResources,ollamaFetch,listenPort:0});
+async function fixture(run,ollamaFetch=async()=>json({models:[]}),options={}){
+    const server=await startServer(config,{sampleResources,ollamaFetch,listenPort:0,...options});
     try{await run('http://127.0.0.1:'+server.address().port,server);}finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 }
 test('public configuration rejects non-loopback upstreams and invalid limits',()=>{
@@ -56,4 +56,30 @@ test('disconnect cancels upstream inference and attempts model unload',async()=>
         if(pathname==='/api/chat'){started();return new Promise((resolve,reject)=>{options.signal.addEventListener('abort',()=>{aborted();reject(options.signal.reason);},{once:true});});}
         if(pathname==='/api/generate')unloaded();return json({models:[]});
     });
+});
+
+test('disconnect during a resource sample never starts inference or unloads an unstarted model',async()=>{
+    let sampleStarted,finishSample,cleanupObserved;
+    const started=new Promise(resolve=>sampleStarted=resolve);
+    const pendingSample=new Promise(resolve=>finishSample=resolve);
+    const cleanup=new Promise(resolve=>cleanupObserved=resolve);
+    const calls=[];let samples=0;
+    await fixture(async(base,server)=>{
+        let responseClosed;
+        const closed=new Promise(resolve=>responseClosed=resolve);
+        server.once('request',(_req,res)=>res.once('close',responseClosed));
+        const controller=new AbortController();
+        const request=fetch(base+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input),signal:controller.signal}).catch(error=>error);
+        await started;controller.abort();await request;await closed;
+        finishSample({usedMiB:1000,freeMiB:5000,temperatureC:60,systemFreeGiB:8});
+        await cleanup;
+        const health=await (await fetch(base+'/health')).json();
+        assert.equal(health.active,null);assert.match(health.last.error,/取消/);
+        assert.deepEqual(calls,['/api/ps']);
+    },async(url,options)=>{
+        const pathname=new URL(url).pathname;calls.push(pathname);
+        if(pathname==='/api/ps')cleanupObserved();
+        if(options.signal?.aborted)throw options.signal.reason;
+        return json({models:[]});
+    },{sampleResources:async()=>{if(++samples===1){sampleStarted();return pendingSample;}return sampleResources();}});
 });

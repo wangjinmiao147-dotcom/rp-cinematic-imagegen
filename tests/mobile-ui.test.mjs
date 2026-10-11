@@ -38,6 +38,6 @@ test('settings exposes a dedicated User three-view upload backed by the isolated
   assert.match(source, /id="rpig-user-three-view-upload"/);
   assert.match(source, /上传 User 三视图/);
   assert.match(source, /getCharacterRefs\('user'\)/);
-  assert.match(source, /saveCharacterRefs\('user',/);
+  assert.match(source, /updateCharacterRefs\('user',/);
   assert.match(source, /仅当剧情分析确认 User 实际入镜时/);
 });

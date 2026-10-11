@@ -3,6 +3,15 @@ import { blobToDataUrl, dataUrlToBlob, RpigError } from './utils.js';
 
 export const MAX_REFERENCE_ARCHIVE_BYTES = 30 * 1024 * 1024;
 
+function archiveViewType(ref) {
+    if (['single', 'full_body', 'three_views', 'face_crop'].includes(ref.viewType)) return ref.viewType;
+    const legacyType = String(ref.type || ref.label || '');
+    if (/three_views|三视|turnaround|3 views/i.test(legacyType)) return 'three_views';
+    if (/face_crop|脸部特写|face detail/i.test(legacyType)) return 'face_crop';
+    if (/full_body|全身立绘|full.body/i.test(legacyType)) return 'full_body';
+    return 'single';
+}
+
 export async function readReferenceImport(file, convert = blobToDataUrl) {
     if (!file || !file.size || file.size > MAX_REFERENCE_ARCHIVE_BYTES) throw new RpigError('REFERENCE_IMPORT_INVALID', '导入文件为空或超过 30MB');
     const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
@@ -22,13 +31,17 @@ export async function readReferenceImport(file, convert = blobToDataUrl) {
 }
 
 export async function exportReferenceArchive(refs, fetchImage) {
-    const hydrated = await hydrateReferenceImages(refs, fetchImage, 50);
+    if (!Array.isArray(refs) || refs.length > 50) throw new RpigError('REFERENCE_ARCHIVE_INVALID', '参考图包最多包含 50 张参考图');
+    // Generation deduplicates image bytes, but a portable backup must retain
+    // each view's primary/enabled/purpose metadata even when its bytes repeat.
+    const hydrated = [];
+    for (const ref of refs) hydrated.push(...await hydrateReferenceImages([ref], fetchImage, 1));
     const text = JSON.stringify({ format: 'rpig-references', version: 1,
         views: hydrated.map(ref => ({
             label: String(ref.label || '参考图'),
             dataUrl: ref.dataUrl,
             isPrimaryIdentity: !!ref.isPrimaryIdentity,
-            viewType: ['single', 'full_body', 'three_views', 'face_crop'].includes(ref.viewType) ? ref.viewType : 'single',
+            viewType: archiveViewType(ref),
             enabled: ref.enabled !== false,
         })) });
     if (new Blob([text]).size > MAX_REFERENCE_ARCHIVE_BYTES) throw new RpigError('REFERENCE_ARCHIVE_TOO_LARGE', '参考图包超过 30MB，请分批迁移');
@@ -48,7 +61,7 @@ export function parseReferenceArchive(text) {
             label: String(ref.label || '导入参考图').slice(0, 160),
             dataUrl: ref.dataUrl,
             isPrimaryIdentity: !!ref.isPrimaryIdentity,
-            viewType: ['single', 'full_body', 'three_views', 'face_crop'].includes(ref.viewType) ? ref.viewType : 'single',
+            viewType: archiveViewType(ref),
             enabled: ref.enabled !== false,
         };
     });

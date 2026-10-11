@@ -2,7 +2,7 @@
 // RP 电影配图 - 图库与多视图持久化模块
 // ============================================================
 
-import { blobToDataUrl, stripHtml, RpigError, isAbortError, scrubSensitiveText } from './utils.js';
+import { stripHtml, RpigError, isAbortError, scrubSensitiveText, throwIfAborted } from './utils.js';
 
 const REFS_DB_NAME = 'rpig-refs';
 const REFS_STORE = 'refs';
@@ -150,6 +150,7 @@ export function getPreviousGeneratedImage(chat, beforeIndex, character, options 
  * @returns {Promise<string>}
  */
 export async function persistMediaUrl(rawUrl, characterName = 'character', options = {}) {
+    throwIfAborted(options.signal);
     if (!rawUrl || typeof rawUrl !== 'string') {
         throw new Error('无效的媒体 URL');
     }
@@ -173,11 +174,13 @@ export async function persistMediaUrl(rawUrl, characterName = 'character', optio
 
         try {
             const savedPath = await saveFn(parsed.base64Body, safeFolder, fileName, parsed.extension);
+            throwIfAborted(options.signal);
             if (typeof savedPath === 'string' && savedPath.trim()) {
                 return savedPath.trim();
             }
             throw new Error('saveBase64AsFile 返回了空路径');
         } catch (err) {
+            if (isAbortError(err)) throw err;
             console.error('[RP 电影配图] saveBase64AsFile 存储异常:', err);
             throw new Error(`媒体文件保存到酒馆服务器失败：${err.message || err}`);
         }
@@ -195,7 +198,8 @@ export async function persistMediaUrl(rawUrl, characterName = 'character', optio
 
         let fetchedDataUrl;
         try {
-            fetchedDataUrl = await fetchFn(rawUrl);
+            fetchedDataUrl = await fetchFn(rawUrl, { signal: options.signal });
+            throwIfAborted(options.signal);
         } catch (fetchErr) {
             if (isAbortError(fetchErr)) throw fetchErr;
             throw new RpigError('TEMP_IMAGE_DOWNLOAD_FAILED', `生成接口已返回图片链接，但临时图片无法下载：${scrubSensitiveText(fetchErr.message || String(fetchErr))}。这不是 edits 不支持；请检查下载请求的 CORS、链接有效期与 HTTP 状态`, { reason: fetchErr.code || fetchErr.name });
@@ -208,11 +212,13 @@ export async function persistMediaUrl(rawUrl, characterName = 'character', optio
 
         try {
             const savedPath = await saveFn(parsed.base64Body, safeFolder, fileName, parsed.extension);
+            throwIfAborted(options.signal);
             if (typeof savedPath === 'string' && savedPath.trim()) {
                 return savedPath.trim();
             }
             throw new Error('saveBase64AsFile 返回了空路径');
         } catch (saveErr) {
+            if (isAbortError(saveErr)) throw saveErr;
             throw new Error(`远程临时图片保存到服务器失败：${saveErr.message || saveErr}`);
         }
     }
@@ -224,154 +230,163 @@ export async function persistMediaUrl(rawUrl, characterName = 'character', optio
 // ------------------------------------------------------------
 // IndexedDB: 多视图参考图
 // ------------------------------------------------------------
-export function openRefsDB() {
+function openImageDB(name, storeName, label, errorPrefix) {
     return new Promise((resolve, reject) => {
         if (typeof indexedDB === 'undefined') {
             return reject(new Error('IndexedDB 不可用'));
         }
-        const request = indexedDB.open(REFS_DB_NAME, 1);
+        const request = indexedDB.open(name, 1);
         let abandoned = false;
-        const timer = setTimeout(() => { abandoned = true; reject(new RpigError('REFERENCE_STORAGE_BLOCKED', '参考图库打开超时，请关闭其他酒馆标签页后重试')); }, 10000);
+        const timer = setTimeout(() => { abandoned = true; reject(new RpigError(`${errorPrefix}_BLOCKED`, `${label}打开超时，请关闭其他酒馆标签页后重试`)); }, 10000);
         request.onupgradeneeded = () => {
-            request.result.createObjectStore(REFS_STORE, { keyPath: 'characterId' });
+            request.result.createObjectStore(storeName, { keyPath: 'characterId' });
         };
-        request.onsuccess = () => { clearTimeout(timer); if (abandoned) request.result.close(); else resolve(request.result); };
+        request.onsuccess = () => {
+            clearTimeout(timer);
+            const db = request.result;
+            db.onversionchange = () => db.close();
+            if (abandoned) db.close(); else resolve(db);
+        };
         request.onerror = () => { clearTimeout(timer); reject(request.error); };
-        request.onblocked = () => { clearTimeout(timer); abandoned = true; reject(new RpigError('REFERENCE_STORAGE_BLOCKED', '参考图库被其他标签页阻塞，请关闭其他酒馆标签页后重试')); };
+        request.onblocked = () => { clearTimeout(timer); abandoned = true; reject(new RpigError(`${errorPrefix}_BLOCKED`, `${label}被其他标签页阻塞，请关闭其他酒馆标签页后重试`)); };
+    });
+}
+
+export function openRefsDB() {
+    return openImageDB(REFS_DB_NAME, REFS_STORE, '参考图库', 'REFERENCE_STORAGE');
+}
+
+export function openGalleryDB() {
+    return openImageDB(GALLERY_DB_NAME, GALLERY_STORE, '角色图库', 'GALLERY_STORAGE');
+}
+
+/** Read/modify/write in one transaction so concurrent writers never overwrite a stale snapshot. */
+async function accessImageList(openDB, storeName, field, key, update, errorPrefix, label) {
+    if (!key || key === 'default') return [];
+    let db;
+    try {
+        db = await openDB();
+        return await new Promise((resolve, reject) => {
+            let tx;
+            let result = [];
+            let operationError;
+            try {
+                tx = db.transaction(storeName, update ? 'readwrite' : 'readonly');
+                tx.oncomplete = () => resolve(result);
+                tx.onerror = tx.onabort = () => reject(operationError || tx.error || new Error(`${label}事务已中止`));
+                const store = tx.objectStore(storeName);
+                const req = store.get(key);
+                req.onerror = () => reject(req.error);
+                req.onsuccess = () => {
+                    try {
+                        result = Array.isArray(req.result?.[field]) ? req.result[field] : [];
+                        if (update) {
+                            result = update(result);
+                            if (!Array.isArray(result)) throw new TypeError('图库更新必须返回数组');
+                            store.put({ characterId: key, [field]: result });
+                        }
+                    } catch (error) {
+                        operationError = error;
+                        tx.abort();
+                    }
+                };
+            } catch (error) {
+                operationError = error;
+                try { tx?.abort(); } catch { /* The transaction may already have ended. */ }
+                reject(error);
+            }
+        });
+    } catch (error) {
+        const action = update ? '保存' : '读取';
+        const failure = new RpigError(`${errorPrefix}_${update ? 'WRITE' : 'READ'}_FAILED`, `${label}${action}失败：${error?.name || 'Error'}：${error?.message || error}${update ? '' : '。读取失败不等于图库为空'}`, { reason: error?.code || error?.name });
+        console.error('[RP 电影配图]', failure);
+        throw failure;
+    } finally { db?.close(); }
+}
+
+function cleanStoredImage(image) {
+    const item = { ...image };
+    if (typeof item.url === 'string' && item.url && !item.url.startsWith('data:')) delete item.dataUrl;
+    return item;
+}
+
+let referenceIdSequence = 0;
+function newReferenceId() {
+    let entropy;
+    try { entropy = globalThis.crypto?.randomUUID?.(); } catch { /* Older WebViews may lack a secure context. */ }
+    return `ref_${entropy || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`}_${++referenceIdSequence}`;
+}
+
+function referencesHaveIds(views) {
+    const seen = new Set();
+    return views.every(view => {
+        const id = view?.refId;
+        if (typeof id !== 'string' || !id.trim() || seen.has(id)) return false;
+        seen.add(id); return true;
+    });
+}
+
+function ensureReferenceIds(views) {
+    const used = new Set();
+    return views.map(view => {
+        const item = cleanStoredImage(view);
+        let id = item.refId;
+        if (typeof id !== 'string' || !id.trim() || used.has(id)) {
+            do { id = newReferenceId(); } while (used.has(id));
+        }
+        used.add(id);
+        return { ...item, refId: id };
     });
 }
 
 export async function getCharacterRefs(characterOrId) {
-    const key = getCharacterIdentifier(characterOrId);
-    if (!key || key === 'default') return [];
-    let db;
-    try {
-        db = await openRefsDB();
-        return await new Promise((resolve, reject) => {
-            const tx = db.transaction(REFS_STORE, 'readonly');
-            const req = tx.objectStore(REFS_STORE).get(key);
-            let views = [];
-            req.onsuccess = () => { views = Array.isArray(req.result?.views) ? req.result.views : []; };
-            req.onerror = () => reject(req.error);
-            tx.oncomplete = () => { db.close(); resolve(views); };
-            tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('参考图读取事务已中止')); };
-        });
-    } catch (error) {
-        const failure = new RpigError('REFERENCE_STORAGE_READ_FAILED', `参考图库读取失败：${error?.name || 'Error'}：${error?.message || error}。读取失败不等于没有参考图`, { reason: error?.code || error?.name });
-        console.error('[RP 电影配图]', failure);
-        throw failure;
-    } finally { db?.close(); }
+    const views = await accessImageList(openRefsDB, REFS_STORE, 'views', getCharacterIdentifier(characterOrId), null, 'REFERENCE_STORAGE', '参考图库');
+    if (referencesHaveIds(views)) return views;
+    // Re-read inside the write transaction: another tab may have imported or
+    // edited references after the initial read. Never migrate that stale list.
+    try { return await updateCharacterRefs(characterOrId, current => current); }
+    catch (error) {
+        throw new RpigError('REFERENCE_STORAGE_READ_FAILED', `参考图库标识迁移失败：${error?.message || error}。读取失败不等于图库为空`, { reason: error?.code || error?.name });
+    }
+}
+
+/** The callback must be synchronous; async work belongs before the transaction. */
+export function updateCharacterRefs(characterOrId, update) {
+    return accessImageList(openRefsDB, REFS_STORE, 'views', getCharacterIdentifier(characterOrId), views => {
+        const next = update(ensureReferenceIds(views));
+        if (!Array.isArray(next)) throw new TypeError('参考图更新必须返回数组');
+        if (next.length > MAX_REFS_PER_CHAR) throw new Error(`参考图数量超过上限 (${MAX_REFS_PER_CHAR} 张)，未保存或截断`);
+        return ensureReferenceIds(next);
+    }, 'REFERENCE_STORAGE', '参考图库');
 }
 
 export async function saveCharacterRefs(characterOrId, views) {
-    const key = getCharacterIdentifier(characterOrId);
-    if (!key || key === 'default') return;
-    let db;
-    try {
-        db = await openRefsDB();
-        return await new Promise((resolve, reject) => {
-            const tx = db.transaction(REFS_STORE, 'readwrite');
-            // 只保留 url 与 label，清理冗余的大 base64
-            const cleanViews = (views || []).slice(0, MAX_REFS_PER_CHAR).map(v => {
-                const item = { ...v };
-                if (item.url && !item.url.startsWith('data:')) {
-                    delete item.dataUrl;
-                }
-                return item;
-            });
-            tx.objectStore(REFS_STORE).put({ characterId: key, views: cleanViews });
-            tx.oncomplete = () => { db.close(); resolve(); };
-            tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('参考图保存事务已中止')); };
-        });
-    } catch (e) {
-        const failure = new RpigError('REFERENCE_STORAGE_WRITE_FAILED', `参考图保存失败：${e?.name || 'Error'}：${e?.message || e}`);
-        console.error('[RP 电影配图]', failure);
-        throw failure;
-    } finally { db?.close(); }
+    await updateCharacterRefs(characterOrId, () => views || []);
 }
 
 // ------------------------------------------------------------
 // IndexedDB: 角色专属图库
 // ------------------------------------------------------------
-export function openGalleryDB() {
-    return new Promise((resolve, reject) => {
-        if (typeof indexedDB === 'undefined') {
-            return reject(new Error('IndexedDB 不可用'));
-        }
-        const request = indexedDB.open(GALLERY_DB_NAME, 1);
-        request.onupgradeneeded = () => {
-            request.result.createObjectStore(GALLERY_STORE, { keyPath: 'characterId' });
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-    });
+export function getStoredGallery(characterOrId) {
+    return accessImageList(openGalleryDB, GALLERY_STORE, 'images', getCharacterIdentifier(characterOrId), null, 'GALLERY_STORAGE', '角色图库');
 }
 
-export async function getStoredGallery(charKey) {
-    if (!charKey || charKey === 'default') return [];
-    try {
-        const db = await openGalleryDB();
-        return new Promise((resolve) => {
-            const tx = db.transaction(GALLERY_STORE, 'readonly');
-            const req = tx.objectStore(GALLERY_STORE).get(charKey);
-            req.onsuccess = () => resolve(Array.isArray(req.result?.images) ? req.result.images : []);
-            req.onerror = () => resolve([]);
-        });
-    } catch {
-        return [];
-    }
+function updateStoredGallery(characterOrId, update) {
+    return accessImageList(openGalleryDB, GALLERY_STORE, 'images', getCharacterIdentifier(characterOrId), update, 'GALLERY_STORAGE', '角色图库');
 }
 
 export async function saveToGallery(characterOrId, entry) {
-    const key = getCharacterIdentifier(characterOrId);
-    if (!key || key === 'default' || !entry) return;
-    try {
-        const db = await openGalleryDB();
-        const images = await getStoredGallery(key);
-        // 去重
+    if (!entry) return;
+    await updateStoredGallery(characterOrId, images => {
         const targetUrl = entry.url || entry.dataUrl;
-        const filtered = images.filter(i => (i.url !== targetUrl && i.dataUrl !== targetUrl));
-
-        // 避免在独立图库中冗余塞入超大 base64
-        const cleanEntry = { ...entry };
-        if (cleanEntry.url && !cleanEntry.url.startsWith('data:')) {
-            delete cleanEntry.dataUrl;
-        }
-
-        filtered.unshift(cleanEntry);
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(GALLERY_STORE, 'readwrite');
-            tx.objectStore(GALLERY_STORE).put({ characterId: key, images: filtered.slice(0, 300) });
-            tx.oncomplete = () => resolve();
-            tx.onerror = (e) => reject(e);
-        });
-    } catch (e) {
-        if (typeof indexedDB !== 'undefined') {
-            console.error('[RP 电影配图] 保存到图库失败:', e);
-            throw e;
-        }
-    }
+        const filtered = images.filter(i => i.url !== targetUrl && i.dataUrl !== targetUrl);
+        return [cleanStoredImage(entry), ...filtered].slice(0, 300);
+    });
 }
 
 export async function removeFromGallery(characterOrId, targetUrl) {
-    const key = getCharacterIdentifier(characterOrId);
-    if (!key || !targetUrl) return;
-    try {
-        const db = await openGalleryDB();
-        let images = await getStoredGallery(key);
-        images = images.filter(i => (i.url !== targetUrl && i.dataUrl !== targetUrl));
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(GALLERY_STORE, 'readwrite');
-            tx.objectStore(GALLERY_STORE).put({ characterId: key, images: images });
-            tx.oncomplete = () => resolve();
-            tx.onerror = (e) => reject(e);
-        });
-    } catch (e) {
-        if (typeof indexedDB !== 'undefined') {
-            console.error('[RP 电影配图] 从图库移除失败:', e);
-            throw e;
-        }
-    }
+    if (!targetUrl) return;
+    await updateStoredGallery(characterOrId, images => images.filter(i => i.url !== targetUrl && i.dataUrl !== targetUrl));
 }
 
 // ------------------------------------------------------------
@@ -436,7 +451,7 @@ export async function getAllImagesForCharacter(character, getContextFn) {
         for (const s of stored) {
             addImg(s.url || s.dataUrl, s.title, s.time);
         }
-    } catch { /* ignore */ }
+    } catch (error) { console.error('[RP 电影配图] 角色图库读取失败:', error); throw error; }
 
     images.sort((a, b) => (b.time || 0) - (a.time || 0));
     return images;
@@ -446,7 +461,12 @@ export async function getAllImagesForCharacter(character, getContextFn) {
  * 彻底删除图片：同时清理 IndexedDB 图库、参考图与当前会话消息中的挂载
  */
 export async function deleteImageCompletely(character, targetUrl, getContextFn) {
-    if (!targetUrl) return;
+    const context = typeof getContextFn === 'function' ? getContextFn() : null;
+    const chat = context?.chat || [];
+    const session = [context?.chatId, context?.characterId, context?.groupId,
+        typeof window !== 'undefined' ? window.selected_chat : undefined];
+    const result = { affectedMessageIndexes: [], chatModified: false, chatSkipped: false, context };
+    if (!targetUrl) return result;
 
     // 1. 从图库数据库删除
     if (character) {
@@ -456,48 +476,69 @@ export async function deleteImageCompletely(character, targetUrl, getContextFn) 
     // 2. 从参考图列表删除
     if (character) {
         try {
-            const refs = await getCharacterRefs(character);
-            const filteredRefs = refs.filter(r => r.dataUrl !== targetUrl && r.url !== targetUrl);
-            if (filteredRefs.length !== refs.length) {
-                await saveCharacterRefs(character, filteredRefs);
-            }
+            await updateCharacterRefs(character, refs => refs.filter(r => r.dataUrl !== targetUrl && r.url !== targetUrl));
         } catch (error) { console.error('[RP 电影配图] 删除参考图失败:', error); throw error; }
     }
 
     // 3. 从当前聊天消息 extra.media 中清除并保存会话
     try {
-        const context = typeof getContextFn === 'function' ? getContextFn() : null;
-        const chat = context?.chat || [];
-        let chatModified = false;
+        if (typeof getContextFn === 'function') {
+            const current = getContextFn();
+            const currentSession = [current?.chatId, current?.characterId, current?.groupId,
+                typeof window !== 'undefined' ? window.selected_chat : undefined];
+            if (current?.chat !== context?.chat || currentSession.some((id, index) => id !== session[index])) {
+                result.chatSkipped = true;
+                return result;
+            }
+        }
+
+        const changes = [];
 
         for (let i = 0; i < chat.length; i++) {
             const msg = chat[i];
             if (!msg?.extra) continue;
+            const next = {};
             if (Array.isArray(msg.extra.media)) {
-                const lenBefore = msg.extra.media.length;
-                msg.extra.media = msg.extra.media.filter(m => m && m.url !== targetUrl);
-                if (msg.extra.media.length !== lenBefore) {
-                    chatModified = true;
-                }
+                const media = msg.extra.media.filter(m => !m || m.url !== targetUrl);
+                if (media.length !== msg.extra.media.length) next.media = media;
             }
-            if (msg.extra.image === targetUrl) {
-                delete msg.extra.image;
-                chatModified = true;
+            if (msg.extra.image === targetUrl) next.image = undefined;
+            if (msg.extra.rpigInfo?.outputUrl === targetUrl) {
+                next.rpigInfo = { ...msg.extra.rpigInfo };
+                delete next.rpigInfo.outputUrl;
             }
             if (Array.isArray(msg.extra.image_swipes)) {
-                const lenBefore = msg.extra.image_swipes.length;
-                msg.extra.image_swipes = msg.extra.image_swipes.filter(u => u !== targetUrl);
-                if (msg.extra.image_swipes.length !== lenBefore) {
-                    chatModified = true;
-                }
+                const swipes = msg.extra.image_swipes.filter(u => u !== targetUrl);
+                if (swipes.length !== msg.extra.image_swipes.length) next.image_swipes = swipes;
+            }
+            if (Object.keys(next).length) {
+                const previous = Object.fromEntries(Object.keys(next).map(key => [key, { value: msg.extra[key], exists: Object.prototype.hasOwnProperty.call(msg.extra, key) }]));
+                changes.push({ extra: msg.extra, previous, next });
+                result.affectedMessageIndexes.push(i);
             }
         }
 
-        if (chatModified && typeof context?.saveChat === 'function') {
-            await context.saveChat();
+        if (changes.length) {
+            if (typeof context?.saveChat !== 'function') throw new RpigError('GALLERY_CHAT_SAVE_FAILED', '当前会话无法保存，聊天中的图片未删除');
+            for (const { extra, next } of changes) for (const [key, value] of Object.entries(next)) {
+                if (value === undefined) delete extra[key]; else extra[key] = value;
+            }
+            try {
+                if (await context.saveChat() === false) throw new RpigError('GALLERY_CHAT_SAVE_FAILED', '会话保存失败');
+            } catch (error) {
+                // Undo only fields still owned by this deletion. Preserve
+                // concurrent changes made while chat persistence was pending.
+                for (const { extra, previous, next } of changes) for (const [key, saved] of Object.entries(previous)) {
+                    if (extra[key] !== next[key]) continue;
+                    if (saved.exists) extra[key] = saved.value; else delete extra[key];
+                }
+                throw error;
+            }
+            result.chatModified = true;
         }
     } catch (e) {
         console.warn('[RP 电影配图] 清除聊天挂载媒体异常:', e);
         throw e;
     }
+    return result;
 }

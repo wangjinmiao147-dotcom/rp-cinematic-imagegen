@@ -3,10 +3,13 @@ import { getCurrentWorldAgeContext } from './src/character-world-context.js';
 import { parseAnalysisResponse } from './src/analysis-validation.js';
 import { isLocalQwen, qwenSteps, activeReferenceViews } from './src/qwen.js';
 import { composeStoryEdit, hasRequestedThoughtBubble } from './src/visual-constraints.js';
-import { buildVersionedSceneState, getPreviousSceneState, getEffectivePreviousState, getIllustrationFacts, storyFingerprint, canUseContinuityReference } from './src/scene-state.js';
+import { buildVersionedSceneState, getPreviousSceneState, getEffectivePreviousState, getIllustrationFacts, canUseContinuityReference } from './src/scene-state.js';
 import { sanitizeDiagnostics, persistGenerationDiagnostics } from './src/diagnostics.js';
+import { downloadDiagnosticReport } from './src/diagnostic-report.js';
+import { captureChatSource, isChatSourceCurrent, captureMessageSource, isMessageSourceCurrent, snapshotGenerationSettings } from './src/task-context.js';
+import { mergeReferenceViews, modifyReferenceViews } from './src/reference-state.js';
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.57
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.61
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -27,7 +30,6 @@ import {
     escapeHtml,
     stripHtml,
     extractJson,
-    blobToDataUrl,
     fetchToDataUrl,
     resolvePromptFormat,
     scrubSensitiveText,
@@ -45,29 +47,17 @@ import { exportReferenceArchive, readReferenceImport, MAX_REFERENCE_ARCHIVE_BYTE
 import { createImageRetryCache, imageRetrySignature } from './src/image-retry.js';
 import { openLocalDetailEditor } from './src/local-detail.js';
 import { captureLocalDetailSource, saveLocalDetailCandidate } from './src/local-detail-save.js';
+import { createOverlayLifecycle, captureOverlayContext } from './src/overlay-lifecycle.js';
 
 import {
     DEFAULT_SD_NEGATIVE,
     STYLE_PRESETS,
-    SHOT_MODE_INSTRUCTIONS,
-    FORMAT_INSTRUCTIONS,
-    DIRECTOR_SYSTEM_PROMPT,
-    OMNISCIENT_SYSTEM_PROMPT,
-    FINALIZER_SYSTEM_PROMPT,
-    STORY_FACTS_SYSTEM_PROMPT,
-    RELATION_CHECKER_SYSTEM_PROMPT,
-    EDIT_INSTRUCTION_SYSTEM_PROMPT,
-    UNIFIED_STYLE_IDENTITY_TEMPLATE,
     buildStoryFactsPrompt,
     buildRelationCheckerPrompt,
     buildEditInstructionPrompt,
     assembleUnifiedPrompt,
     getCharacterVisualAnchor,
     buildDialogueContext,
-    buildDirectorPrompt,
-    buildOmniscientPrompt,
-    buildFinalizerPrompt,
-    normalizeFinalPromptOutput,
     collapsePromptToSingleParagraph,
     buildCharacterSheetPrompt,
     buildSceneAwareImagePrompt,
@@ -75,7 +65,6 @@ import {
 
 import {
     BACKENDS,
-    SIZE_MAP,
     generateImage,
     generateLocalDetailEdit,
 } from './src/backends.js';
@@ -87,10 +76,8 @@ import {
     isMessageForCharacter,
     getCharacterRefs,
     getPreviousGeneratedImage,
-    saveCharacterRefs,
-    getStoredGallery,
+    updateCharacterRefs,
     saveToGallery,
-    removeFromGallery,
     getAllImagesForCharacter,
     deleteImageCompletely,
     persistMediaUrl,
@@ -112,6 +99,7 @@ import { resolveCastReferencePlan } from './src/character-identities.js';
 // 常量定义与默认设置
 // ------------------------------------------------------------
 const extensionName = 'rp-cinematic-imagegen';
+const pluginVersion = '2.9.61';
 
 const defaultSettings = {
     // 图片后端
@@ -137,6 +125,7 @@ const defaultSettings = {
     autoWindow: 12,      // 分析最近 N 条消息
     previewBeforeGeneration: true, // 手动生成时预览并可编辑最终提示词
     imageRetryMode: 'reanalyze', // 失败重试时复用分析，或由用户选择重新分析
+    errorReportIncludeText: false, // 错误报告默认仅包含无剧情的技术诊断
     // LLM（剧情检测与配图提示词生成）
     llmSource: 'tavern', // tavern=复用酒馆当前LLM, custom=扩展内独立配置
     llmUrl: '',
@@ -174,6 +163,28 @@ const defaultSettings = {
 
 function getSettings() {
     return extension_settings[extensionName];
+}
+
+async function exportErrorReport() {
+    const s = getSettings();
+    try {
+        const result = await downloadDiagnosticReport({
+            version: pluginVersion,
+            settings: s,
+            chat: getContext()?.chat || [],
+            includeText: s.errorReportIncludeText === true,
+        });
+        if (result.recordCount > 0) {
+            toastr.success(`已导出错误报告：${result.recordCount} 条诊断，其中 ${result.failedCount} 条失败。`, '', { escapeHtml: true });
+        } else {
+            toastr.info('暂无生成诊断，已导出环境报告；生图失败后可再次导出。', '', { escapeHtml: true });
+        }
+        return result;
+    } catch (error) {
+        const detail = scrubSensitiveText(error?.message || String(error), [s.backendKey, s.llmKey, s.finalLlmKey]);
+        toastr.error(`错误报告导出失败：${detail}。请确认浏览器允许下载，再重试。`, '', { escapeHtml: true });
+        return null;
+    }
 }
 
 function loadSettings() {
@@ -216,12 +227,6 @@ function loadSettings() {
         s.qwenBoundedStepsV1 = true;
         saveSettingsDebounced();
     }
-}
-
-function parseDirectorLlmOutput(raw) {
-    const json = extractJson(raw) || {};
-    const finalPrompt = String(json.final_prompt || json.prompt || '').trim();
-    return { json, finalPrompt };
 }
 
 function getAllCharacters() {
@@ -352,20 +357,8 @@ function buildParticipantContext(context, chat, messageIndex, focalCharacter, cu
     return lines.join('\n');
 }
 
-function enforceOmniscientEnsemble(prompt, visibleCharacters, excludedCharacters = []) {
-    const names = Array.isArray(visibleCharacters) ? visibleCharacters.filter(Boolean).slice(0, 12) : [];
-    if (!names.length) return collapsePromptToSingleParagraph(prompt);
-    const shot = names.length === 1 ? 'single-character medium shot' : names.length === 2 ? 'balanced two-shot' : 'clear group ensemble shot';
-    const bubbleException = hasRequestedThoughtBubble(prompt) ? ' The explicitly requested same-person avatar inside the thought bubble is a symbolic representation, not a physical cast member.' : '';
-    const ensembleRule = `The visible main cast is locked to exactly ${names.length} distinct physical ${names.length === 1 ? 'person' : 'people'}: ${names.join(', ')}. Use one unified ${shot} for the physical scene; show every listed physical person exactly once.${bubbleException} Do not add any other physical people, bystanders, or crowds.`;
-    const excluded = Array.isArray(excludedCharacters) ? excludedCharacters.filter(Boolean).slice(0, 12) : [];
-    const exclusionRule = excluded.length
-        ? `The following story participants are explicitly off-camera and must not appear in any form: ${excluded.join(', ')}.`
-        : '';
-    return collapsePromptToSingleParagraph(`${ensembleRule} ${exclusionRule} ${prompt}`);
-}
-
-async function getCharacterAvatarInfo(character, { fullOnly = false } = {}) {
+async function getCharacterAvatarInfo(character, { fullOnly = false, signal } = {}) {
+    throwIfAborted(signal);
     if (!character || !character.avatar) return null;
     const context = getContext();
     const fullUrls = [
@@ -374,7 +367,8 @@ async function getCharacterAvatarInfo(character, { fullOnly = false } = {}) {
     ];
     for (const url of [...new Set(fullUrls)]) {
         try {
-            const dataUrl = await fetchToDataUrl(url, { timeoutMs: 6000 });
+            const dataUrl = await fetchToDataUrl(url, { timeoutMs: 6000, signal });
+            throwIfAborted(signal);
             if (dataUrl) {
                 return {
                     dataUrl,
@@ -383,7 +377,7 @@ async function getCharacterAvatarInfo(character, { fullOnly = false } = {}) {
                     label: '角色卡完整原图',
                 };
             }
-        } catch (e) {}
+        } catch (e) { if (isAbortError(e)) throw e; }
     }
     if (fullOnly) return null;
 
@@ -394,7 +388,8 @@ async function getCharacterAvatarInfo(character, { fullOnly = false } = {}) {
     thumbUrls.push(`/thumbnail?type=avatar&file=${encodeURIComponent(character.avatar)}`);
     for (const url of [...new Set(thumbUrls)]) {
         try {
-            const dataUrl = await fetchToDataUrl(url, { timeoutMs: 6000 });
+            const dataUrl = await fetchToDataUrl(url, { timeoutMs: 6000, signal });
+            throwIfAborted(signal);
             if (dataUrl) {
                 return {
                     dataUrl,
@@ -403,20 +398,21 @@ async function getCharacterAvatarInfo(character, { fullOnly = false } = {}) {
                     label: '角色卡缩略图（非完整原图）',
                 };
             }
-        } catch (e) {}
+        } catch (e) { if (isAbortError(e)) throw e; }
     }
     return null;
 }
 
-async function getCharacterAvatarDataUrl(character) {
-    const info = await getCharacterAvatarInfo(character, { fullOnly: false });
+async function getCharacterAvatarDataUrl(character, { signal } = {}) {
+    const info = await getCharacterAvatarInfo(character, { fullOnly: false, signal });
     if (info && info.dataUrl) return info.dataUrl;
     throw new RpigError('REFERENCE_AVATAR_FAILED', '角色卡原图和缩略图均读取失败，已停止生成。');
 }
 
 
 
-async function resolveCharacterReferences(charObj, charName, isVisible) {
+async function resolveCharacterReferences(charObj, charName, isVisible, { signal } = {}) {
+    throwIfAborted(signal);
     if (!charObj || !isVisible) return { primaryRef: null, supportingRefs: [], primarySource: null };
     const savedRefs = activeReferenceViews(await getCharacterRefs(charObj));
     const charIdentifier = `character:${getCharacterIdentifier(charObj)}`;
@@ -453,8 +449,9 @@ async function resolveCharacterReferences(charObj, charName, isVisible) {
     // 2. 未指定时，使用角色卡完整原图
     let avatarInfo = null;
     try {
-        avatarInfo = await getCharacterAvatarInfo(charObj, { fullOnly: true });
+        avatarInfo = await getCharacterAvatarInfo(charObj, { fullOnly: true, signal });
     } catch (e) {
+        if (isAbortError(e)) throw e;
         console.warn('[RP] 获取角色卡完整原图异常:', e);
     }
 
@@ -514,8 +511,8 @@ async function resolveCharacterReferences(charObj, charName, isVisible) {
     // 4. 若无保存参考图，且只能读取缩略图
     let thumbInfo = null;
     try {
-        thumbInfo = await getCharacterAvatarInfo(charObj, { fullOnly: false });
-    } catch (e) {}
+        thumbInfo = await getCharacterAvatarInfo(charObj, { fullOnly: false, signal });
+    } catch (e) { if (isAbortError(e)) throw e; }
 
     if (thumbInfo && thumbInfo.dataUrl) {
         const isThumb = thumbInfo.isThumbnail;
@@ -655,8 +652,15 @@ function ensureFallbackMediaRender(messageIndex, message) {
     bindMediaLightbox(messageIndex);
 }
 
+const rpigOverlays = createOverlayLifecycle();
+
 function openLightbox(src, title, sourceMeta = {}) {
     if (!src) return;
+    const contextSnapshot = sourceMeta.contextSnapshot || captureOverlayContext(getContext(), sourceMeta.messageIndex);
+    if (!contextSnapshot.isCurrent(getContext())) return;
+    const handle = rpigOverlays.begin('lightbox');
+    const capturedMeta = { ...sourceMeta, contextSnapshot,
+        character: sourceMeta.character && typeof sourceMeta.character === 'object' ? { ...sourceMeta.character } : sourceMeta.character };
     const overlay = $('<div class="rpig-lightbox"></div>');
     const img = $('<img class="rpig-lightbox-img">').attr('src', src);
     const cap = $('<div class="rpig-lightbox-caption"></div>').text(title || '');
@@ -668,7 +672,7 @@ function openLightbox(src, title, sourceMeta = {}) {
         refine.on('click', async event => {
             event.stopPropagation();
             refine.prop('disabled', true);
-            try { await refineExistingIllustration(src, sourceMeta); }
+            try { await refineExistingIllustration(src, capturedMeta); }
             catch (error) { toastr.error(scrubSensitiveText(error.message || String(error)), '', { escapeHtml: true }); }
             finally { refine.prop('disabled', false); }
         });
@@ -677,22 +681,26 @@ function openLightbox(src, title, sourceMeta = {}) {
     }
 
     let releaseViewport = () => {};
-    const closeHandler = () => {
+    handle.setCleanup(() => {
         releaseViewport();
         $(document).off('keydown.rpigLightbox');
         overlay.remove();
-    };
+    });
+    const closeHandler = () => handle.close();
 
     overlay.on('click', event => { if (event.target === overlay[0] || event.target === img[0]) closeHandler(); });
     $(document).off('keydown.rpigLightbox').on('keydown.rpigLightbox', (e) => {
-        if (e.key === 'Escape') closeHandler();
+        if (e.key === 'Escape') { e.stopImmediatePropagation(); closeHandler(); }
     });
     $('body').append(overlay);
     releaseViewport = fitViewportOverlay(overlay[0]);
 }
 
 async function refineExistingIllustration(sourceUrl, sourceMeta) {
-    const context = getContext();
+    if (sourceMeta.contextSnapshot && !sourceMeta.contextSnapshot.isCurrent(getContext())) {
+        throw new RpigError('LOCAL_DETAIL_SOURCE_CHANGED', '原图所在消息或会话已经变化，请从当前原图重新打开精修');
+    }
+    const context = sourceMeta.contextSnapshot?.context || getContext();
     const character = sourceMeta.character || (Number.isInteger(sourceMeta.messageIndex)
         ? getCharacterForMessage(context.chat?.[sourceMeta.messageIndex]) : getCurrentCharacter());
     const snapshot = captureLocalDetailSource({ context, sourceUrl, character,
@@ -726,6 +734,9 @@ async function refineExistingIllustration(sourceUrl, sourceMeta) {
 
 async function openGallery(characterOrId) {
     const lc = getContext();
+    const contextSnapshot = captureOverlayContext(lc);
+    const handle = rpigOverlays.begin('gallery');
+    rpigOverlays.close('lightbox');
     let character = null;
     if (typeof characterOrId === 'object' && characterOrId) {
         character = characterOrId;
@@ -736,8 +747,13 @@ async function openGallery(characterOrId) {
 
     const charName = character ? (character.name || '角色') : '当前会话';
     let allImages;
-    try { allImages = await getAllImagesForCharacter(character, getContext); }
-    catch (error) { toastr.error(`图库读取失败：${escapeHtml(error.message)}`); return; }
+    try { allImages = await getAllImagesForCharacter(character, () => lc); }
+    catch (error) {
+        if (handle.isCurrent() && contextSnapshot.isCurrent(getContext())) toastr.error(`图库读取失败：${escapeHtml(error.message)}`);
+        handle.close();
+        return;
+    }
+    if (!handle.isCurrent() || !contextSnapshot.isCurrent(getContext())) { handle.close(); return; }
 
     const overlay = $(`<div class="rpig-gallery-overlay">
         <div class="rpig-gallery-header">
@@ -763,7 +779,7 @@ async function openGallery(characterOrId) {
                 </div>
                 <div class="rpig-gallery-card-actions">
                     <button class="rpig-dl" title="下载原图">⬇</button>
-                    <button class="rpig-del" title="彻底删除">✕</button>
+                    <button class="rpig-del" title="从图库和聊天移除">✕</button>
                 </div>
             </div>`);
 
@@ -771,7 +787,7 @@ async function openGallery(characterOrId) {
             card.find('.rpig-gallery-card-title').text(entry.title || '配图');
             card.find('.rpig-gallery-card-time').text(new Date(entry.time || Date.now()).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }));
 
-            card.find('img').on('click', () => openLightbox(src, entry.title || '配图', { character }));
+            card.find('img').on('click', () => openLightbox(src, entry.title || '配图', { character, contextSnapshot }));
             card.find('.rpig-dl').on('click', (e) => {
                 e.stopPropagation();
                 const a = document.createElement('a');
@@ -784,9 +800,23 @@ async function openGallery(characterOrId) {
 
             card.find('.rpig-del').on('click', async (e) => {
                 e.stopPropagation();
+                if (!handle.isCurrent() || !contextSnapshot.isCurrent(getContext())) { handle.close(); return; }
+                const deleteButton = card.find('.rpig-del');
+                if (deleteButton.prop('disabled')) return;
+                deleteButton.prop('disabled', true);
                 try {
-                    await deleteImageCompletely(character, src, getContext);
-                    toastr.success('已从图库与聊天中彻底删除');
+                    const result = await deleteImageCompletely(character, src, getContext);
+                    if (!handle.isCurrent() || !contextSnapshot.isCurrent(getContext()) || result.chatSkipped) return;
+                    if (result.context?.chat === getContext()?.chat) {
+                        for (const messageIndex of result.affectedMessageIndexes) {
+                            const message = result.context.chat[messageIndex];
+                            updateMessageBlock(messageIndex, message);
+                            ensureFallbackMediaRender(messageIndex, message);
+                        }
+                    }
+                    rpigOverlays.close('lightbox');
+                    window.rpigRefreshCharacterUI?.();
+                    toastr.success('已从图库与聊天中移除');
                     card.fadeOut(180, function () {
                         $(this).remove();
                         const remaining = grid.find('.rpig-gallery-card').length;
@@ -796,24 +826,25 @@ async function openGallery(characterOrId) {
                         }
                     });
                 } catch (delErr) {
-                    toastr.error(`删除失败：${escapeHtml(delErr.message || delErr)}`);
-                }
+                    if (handle.isCurrent() && contextSnapshot.isCurrent(getContext())) toastr.error(`删除失败：${escapeHtml(delErr.message || delErr)}`);
+                } finally { deleteButton.prop('disabled', false); }
             });
             grid.append(card);
         });
     }
 
     let releaseViewport = () => {};
-    const closeHandler = () => {
+    handle.setCleanup(() => {
         releaseViewport();
         $(document).off('keydown.rpigGallery');
         overlay.remove();
-    };
+    });
+    const closeHandler = () => handle.close();
 
     overlay.find('#rpig-gallery-close').on('click', closeHandler);
     overlay.on('click', (e) => { if (e.target === overlay[0]) closeHandler(); });
     $(document).off('keydown.rpigGallery').on('keydown.rpigGallery', (e) => {
-        if (e.key === 'Escape') closeHandler();
+        if (e.key === 'Escape' && !rpigOverlays.has('lightbox')) closeHandler();
     });
     $('body').append(overlay);
     releaseViewport = fitViewportOverlay(overlay[0]);
@@ -859,15 +890,16 @@ function updateGenerationQueueUI() {
     $('#rpig-cancel-current').prop('disabled', !active);
     $('#rpig-clear-queue').prop('disabled', waiting === 0);
     if (summary.length) {
-        const activeLabel = active ? (active.kind === 'local-detail' ? '进行中：局部精修' : `进行中：消息 ${active.messageIndex + 1}`) : '当前无运行任务';
+        const activeLabel = active ? (active.kind === 'local-detail' ? '进行中：局部精修'
+            : active.kind === 'character-sheet' ? '进行中：角色形象' : `进行中：消息 ${active.messageIndex + 1}`) : '当前无运行任务';
         summary.text(`${activeLabel} · 排队 ${waiting}`);
     }
     if (taskList.length) {
         taskList.empty().toggle(waiting > 0);
         for (const [index, task] of rpigGenerationQueue.entries()) {
             const mode = task.explicitShotMode || getSettings()?.shotMode || 'snapshot';
-            const label = task.kind === 'local-detail' ? '局部精修' : (mode === 'portrait' ? '表情特写' : '剧情剧照');
-            const sourceLabel = task.kind === 'local-detail' ? '已生成图片' : `消息 ${task.messageIndex + 1}`;
+            const label = task.kind === 'local-detail' ? '局部精修' : task.kind === 'character-sheet' ? '角色形象' : (mode === 'portrait' ? '表情特写' : '剧情剧照');
+            const sourceLabel = task.kind === 'local-detail' ? '已生成图片' : task.kind === 'character-sheet' ? task.options.targetCharacter.name : `消息 ${task.messageIndex + 1}`;
             taskList.append(
                 $('<div class="rpig-queued-task">').append(
                     $('<span>').text(`${index + 1}. ${sourceLabel} · ${label}`),
@@ -900,7 +932,8 @@ function cancelQueuedGeneration(taskId) {
     const [task] = rpigGenerationQueue.splice(index, 1);
     task.resolve({ cancelled: true, queued: true });
     updateGenerationQueueUI();
-    toastr.info(task.kind === 'local-detail' ? '已取消局部精修的排队任务' : `已取消消息 ${task.messageIndex + 1} 的排队任务`);
+    toastr.info(task.kind === 'local-detail' ? '已取消局部精修的排队任务'
+        : task.kind === 'character-sheet' ? '已取消角色形象的排队任务' : `已取消消息 ${task.messageIndex + 1} 的排队任务`);
 }
 
 function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excludedCharacters, refs, shotLabel, signal }) {
@@ -1007,9 +1040,12 @@ function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excl
 }
 
 function generateForMessage(messageIndex, presetPrompt, explicitShotMode, presetAvoid, generationMeta = {}) {
+    const sourceSnapshot = captureMessageSource(getContext(), messageIndex);
+    if (!sourceSnapshot) return Promise.resolve({ cancelled: true, invalidSource: true });
     return new Promise(resolve => {
         const task = {
             id: ++rpigTaskSequence,
+            sourceSnapshot,
             messageIndex,
             presetPrompt,
             explicitShotMode,
@@ -1035,12 +1071,23 @@ async function processGenerationQueue() {
         rpigGenerating = true;
         updateGenerationQueueUI();
         try {
-            const result = task.kind === 'local-detail' ? await executeLocalDetailTask(task) : await executeGenerationTask(task);
+            const staleMessage = !task.kind && !isMessageSourceCurrent(task.sourceSnapshot, getContext());
+            const staleSheet = task.kind === 'character-sheet' && !isChatSourceCurrent(task.sourceSnapshot, getContext());
+            if (staleMessage || staleSheet) {
+                task.resolve({ cancelled: true, stale: true });
+                setGenStatus('idle', '');
+                toastr.info('排队任务的消息或会话已改变，已取消该任务');
+                continue;
+            }
+            const result = task.kind === 'local-detail' ? await executeLocalDetailTask(task)
+                : task.kind === 'character-sheet' ? await executeCharacterSheetTask(task)
+                    : await executeGenerationTask(task);
             task.resolve(result);
-            if (!result?.success && !result?.error && !result?.cancelled) {
+            if (result?.cancelled || (!result?.success && !result?.error)) {
                 setGenStatus('idle', '');
             }
         } catch (error) {
+            if (isAbortError(error)) setGenStatus('idle', '');
             task.resolve({ cancelled: isAbortError(error), error });
         } finally {
             rpigActiveTask = null;
@@ -1087,26 +1134,56 @@ async function executeLocalDetailTask(task) {
     const signal = task.controller.signal;
     const { settings, payload, snapshot } = task;
     const requestId = `rpig_detail_${Date.now()}_${task.id}`;
-    const diagnostic = { requestId, mode: 'local-detail-edit', sourceUrl: snapshot.sourceUrl,
-        sourceSessionKey: snapshot.sessionKey, region: payload.region, status: 'running' };
+    const diagnostic = { requestId, mode: 'local-detail-edit', timestamp: new Date().toISOString(),
+        backend: settings.backend, sourceUrl: snapshot.sourceUrl,
+        sourceSessionKey: snapshot.sessionKey, region: payload.region, status: 'running',
+        stage: 'region-edit', errorCode: null };
     const keys = [settings.backendKey, settings.llmKey, settings.finalLlmKey].filter(Boolean);
     try {
         throwIfAborted(signal);
         setGenStatus('working', '正在局部精修…');
         const result = await generateLocalDetailEdit(settings, payload.instruction, payload.patchDataUrl, {
             patchSize: [256, 256], signal, requestId, diagnostics: diagnostic,
+            assertSourceValid: () => { if (snapshot.isCurrent && !snapshot.isCurrent(getContext)) throw createAbortError('精修原图所在消息已变化'); },
         });
         throwIfAborted(signal);
+        Object.assign(diagnostic, { status: 'success', stage: 'complete', finishedAt: new Date().toISOString() });
         setGenStatus('done', '精修候选已生成，可预览后另存');
         return { success: true, result: { ...result, diagnostics: sanitizeDiagnostics(diagnostic, keys) } };
     } catch (error) {
         diagnostic.status = isAbortError(error) ? 'cancelled' : 'failed';
         diagnostic.error = scrubSensitiveText(error.message || String(error), keys);
+        diagnostic.errorCode = error.code || null;
         if (isAbortError(error)) setGenStatus('idle', '');
         else setGenStatus('error', diagnostic.error);
         return { cancelled: isAbortError(error), error };
     } finally {
         diagnostic.finishedAt ||= new Date().toISOString();
+        persistGenerationDiagnostics(diagnostic, keys);
+    }
+}
+
+async function executeCharacterSheetTask(task) {
+    const isSourceValid = () => isChatSourceCurrent(task.sourceSnapshot, getContext());
+    const settings = getSettings();
+    const keys = [settings.backendKey, settings.llmKey, settings.finalLlmKey].filter(Boolean);
+    const diagnostic = { requestId: `rpig_sheet_${Date.now()}_${task.id}`, mode: 'character-sheet',
+        timestamp: new Date().toISOString(), backend: settings.backend,
+        status: 'running', stage: 'image-request', errorCode: null };
+    try {
+        const result = await renderCharacterSheetFlow(task.options, { signal: task.controller.signal, isSourceValid });
+        diagnostic.status = 'success';
+        diagnostic.stage = 'complete';
+        return { success: true, result };
+    } catch (error) {
+        diagnostic.status = isAbortError(error) ? 'cancelled' : 'failed';
+        diagnostic.error = scrubSensitiveText(error.message || String(error), keys);
+        diagnostic.errorCode = error.code || null;
+        if (isAbortError(error)) setGenStatus('idle', '');
+        else setGenStatus('error', diagnostic.error);
+        return { cancelled: isAbortError(error), error };
+    } finally {
+        diagnostic.finishedAt = new Date().toISOString();
         persistGenerationDiagnostics(diagnostic, keys);
     }
 }
@@ -1117,37 +1194,13 @@ async function executeGenerationTask(task) {
     throwIfAborted(signal);
 
         const context = getContext();
-        const capturedChat = context.chat;
-        const capturedSessionKey = getChatSessionKey(context);
+        const sourceSnapshot = task.sourceSnapshot || captureMessageSource(context, messageIndex);
+        if (!isMessageSourceCurrent(sourceSnapshot, context)) return { cancelled: true, stale: true };
+        const { chat: capturedChat, sessionKey: capturedSessionKey, message: capturedMessage,
+            mes: capturedMes, sourceHistory: capturedSourceHistory } = sourceSnapshot;
+        const isSessionStillValid = () => isMessageSourceCurrent(sourceSnapshot, getContext());
 
-        if (!Array.isArray(capturedChat) || messageIndex < 0 || messageIndex >= capturedChat.length) {
-            return;
-        }
-
-        const capturedMessage = capturedChat[messageIndex];
-        if (!capturedMessage || capturedMessage.is_user) return;
-
-        const capturedMes = capturedMessage.mes;
-        const capturedSwipeId = capturedMessage.swipe_id !== undefined ? capturedMessage.swipe_id : null;
-        const capturedSendDate = capturedMessage.send_date || '';
-        const historySignature = chat => JSON.stringify(chat.slice(0, messageIndex).map(m =>
-            [m?.is_user, m?.is_system, m?.name, m?.swipe_id, storyFingerprint(m?.mes)]));
-        const capturedSourceHistory = historySignature(capturedChat);
-
-        const isSessionStillValid = () => {
-            const curContext = getContext();
-            if (getChatSessionKey(curContext) !== capturedSessionKey) return false;
-            if (curContext.chat !== capturedChat) return false;
-            const curMessage = curContext.chat[messageIndex];
-            if (curMessage !== capturedMessage) return false;
-            if (historySignature(curContext.chat) !== capturedSourceHistory) return false;
-            if (curMessage.mes !== capturedMes) return false;
-            if ((curMessage.swipe_id !== undefined ? curMessage.swipe_id : null) !== capturedSwipeId) return false;
-            if ((curMessage.send_date || '') !== capturedSendDate) return false;
-            return true;
-        };
-
-        const s = getSettings();
+        const s = snapshotGenerationSettings(getSettings());
         const character = getCharacterForMessage(capturedMessage) || getCurrentCharacter();
         const previousGenerated = s.usePreviousImage !== false
             ? getPreviousGeneratedImage(capturedChat, messageIndex, character, {
@@ -1169,7 +1222,8 @@ async function executeGenerationTask(task) {
         let basePrompt = '';
         const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
         const diagnosticKeys = [s.backendKey, s.llmKey, s.finalLlmKey];
-        const taskDiagnostics = { requestId, timestamp: new Date().toISOString(), status: 'running',
+        const taskDiagnostics = { requestId, mode: 'story', backend: s.backend,
+            timestamp: new Date().toISOString(), status: 'running', errorCode: null,
             stage: 'start', referenceFailures: [], conflicts: [], references: [] };
 
         try {
@@ -1380,7 +1434,7 @@ async function executeGenerationTask(task) {
 
             // 按照三级优先级明确解析角色与 User 的主身份与辅助参考图
             taskDiagnostics.stage = 'references';
-            const charRefResolved = await resolveCharacterReferences(character, focalMatch?.actorName || characterName, !!focalMatch);
+            const charRefResolved = await resolveCharacterReferences(character, focalMatch?.actorName || characterName, !!focalMatch, { signal });
             const userRefResolved = await resolveUserReferences(userMatch?.actorName || userName, userIsVisible);
             if (userIsVisible && !userRefResolved.primaryRef && s.stylePreset === 'reference') {
                 throw new RpigError('USER_REFERENCE_REQUIRED', `${userName} 本次入镜，但没有玩家身份图；请上传 User 参考图，或确认玩家本次在画外`);
@@ -1405,7 +1459,7 @@ async function executeGenerationTask(task) {
                 const name=match.actorName;
                 if (match.kind==='unmatched' && s.stylePreset === 'reference') throw new RpigError('CAST_REFERENCE_REQUIRED', `入镜人物「${name}」尚未匹配到角色卡或专属参考图，请在角色图库绑定该人物的参考图`);
                 if (match.character) {
-                    const resolved = await resolveCharacterReferences(match.character, name, true);
+                    const resolved = await resolveCharacterReferences(match.character, name, true, { signal });
                     if (!resolved.primaryRef && s.stylePreset === 'reference') throw new RpigError('CAST_REFERENCE_REQUIRED', `入镜人物「${name}」的主身份图不可用`);
                     if (resolved.primaryRef) pushUniqueRef(resolved.primaryRef);
                     resolved.supportingRefs.forEach(pushUniqueRef);
@@ -1438,6 +1492,7 @@ async function executeGenerationTask(task) {
             const sameMessageReference = continuityReferenceAllowed && previousGenerated?.sourceType === 'same_message';
 
             throwIfAborted(signal);
+            if (!isSessionStillValid()) return { cancelled: true, stale: true };
             if (s.previewBeforeGeneration !== false && generationMeta.automatic !== true && !cached?.confirmedPrompt) {
                 setGenStatus('working', '④/⑤ 📝 等待确认最终提示词…');
                 const review = await reviewFinalPrompt({
@@ -1461,6 +1516,8 @@ async function executeGenerationTask(task) {
                 avoid = review.avoid;
             }
 
+            throwIfAborted(signal);
+            if (!isSessionStillValid()) return { cancelled: true, stale: true };
             analysisSnapshot.confirmedPrompt = prompt;
             analysisSnapshot.confirmedAvoid = avoid;
 
@@ -1469,7 +1526,6 @@ async function executeGenerationTask(task) {
 
             Object.assign(taskDiagnostics, {
                 requestId,
-                timestamp: new Date().toISOString(),
                 primarySource: primarySourceUsed,
                 step1Raw: step1RawText,
                 step1Parsed: step1ParsedJson,
@@ -1498,6 +1554,7 @@ async function executeGenerationTask(task) {
             taskDiagnostics.stage = 'image-request';
             setGenStatus('working', `④/⑤ 🖼 后端渲染中（${shotLabel}）…`);
             result = await generateImage(s, prompt, avoid, refs, {
+                assertSourceValid: () => { if (!isSessionStillValid()) throw createAbortError('生图来源消息已经变化'); },
                 fetchToDataUrl,
                 onWarning: (msg) => toastr.warning(escapeHtml(msg), '', { timeOut: 6000 }),
                 slashCommandParser: SlashCommandParser,
@@ -1532,6 +1589,7 @@ async function executeGenerationTask(task) {
                 persistedUrl = await persistMediaUrl(rawImageData, character?.name, {
                     saveBase64AsFile,
                     fetchToDataUrl,
+                    signal,
                 });
             } catch (pErr) {
                 if (isAbortError(pErr)) throw pErr;
@@ -1653,20 +1711,47 @@ async function executeGenerationTask(task) {
         }
 }
 
-async function generateCharacterSheetFlow({
+async function generateCharacterSheetFlow(options = {}) {
+    const character = options.targetCharacter || getCurrentCharacter();
+    if (!character) throw new Error('请先选择一个绑定的角色');
+    return new Promise((resolve, reject) => {
+        const task = {
+            id: ++rpigTaskSequence, kind: 'character-sheet',
+            options: { ...options, targetCharacter: character }, sourceSnapshot: captureChatSource(getContext()),
+            controller: new AbortController(),
+            resolve: value => {
+                if (value?.cancelled) reject(createAbortError('已取消角色形象生成'));
+                else if (value?.error) reject(value.error);
+                else resolve(value.result);
+            },
+        };
+        rpigGenerationQueue.push(task);
+        updateGenerationQueueUI();
+        if (rpigActiveTask) toastr.info('角色形象已加入生成队列');
+        void processGenerationQueue();
+    });
+}
+
+async function renderCharacterSheetFlow({
     targetCharacter = null,
     type = 'three_views',
     customPrompt = '',
     autoAddToRefs = true,
     denoisingStrength = 0.55,
-}) {
+}, { signal, isSourceValid = () => true } = {}) {
+    const ensureSource = () => {
+        throwIfAborted(signal);
+        if (!isSourceValid()) throw createAbortError('角色形象任务的会话已切换');
+    };
+    ensureSource();
     const character = targetCharacter || getCurrentCharacter();
     if (!character) throw new Error('请先选择一个绑定的角色');
+    const s = snapshotGenerationSettings(getSettings());
 
-    const avatarData = await getCharacterAvatarDataUrl(character);
+    const avatarData = await getCharacterAvatarDataUrl(character, { signal });
+    ensureSource();
     if (!avatarData) throw new Error(`未找到角色「${character.name || ''}」的头像图片，请确保酒馆中该角色有头像`);
 
-    const s = getSettings();
     const isTags = resolvePromptFormat(s) === 'tags';
     const { prompt, avoid } = buildCharacterSheetPrompt({
         character,
@@ -1676,14 +1761,18 @@ async function generateCharacterSheetFlow({
     });
 
     setGenStatus('working', '🎨 正在以原图为参考进行图生图渲染…');
-    const refs = [{ dataUrl: avatarData, label: '角色卡原图' }];
+    const refs = [{ dataUrl: avatarData, label: '角色卡原图', kind: 'identity-primary', role: 'identity-primary',
+        identityName: character.name, identityId: `character:${getCharacterIdentifier(character)}`, source: 'character-card' }];
     const result = await generateImage(s, prompt, avoid, refs, {
+        signal,
+        assertSourceValid: ensureSource,
         denoisingStrength,
         fetchToDataUrl,
         onWarning: (msg) => toastr.warning(escapeHtml(msg)),
         slashCommandParser: SlashCommandParser,
         disableLimbSafeComposition: true,
     });
+    ensureSource();
 
     const rawResultUrl = result.dataUrl || result.imageUrl;
     let addedToRefs = false;
@@ -1695,27 +1784,31 @@ async function generateCharacterSheetFlow({
             persistedUrl = await persistMediaUrl(rawResultUrl, character?.name, {
                 saveBase64AsFile,
                 fetchToDataUrl,
+                signal,
             });
+            ensureSource();
             isPersisted = true;
         } catch (pErr) {
+            if (isAbortError(pErr)) throw pErr;
             console.warn('[RP 电影配图] 形象持久化失败:', pErr);
             toastr.warning(`形象图片持久化失败，仅作为临时预览：${escapeHtml(pErr.message || pErr)}`);
             isPersisted = false;
         }
 
         const label = type === 'three_views' ? '📐 图生图三视图' : '🧍 图生图全身立绘';
+        ensureSource();
         if (isPersisted && autoAddToRefs) {
-            const views = await getCharacterRefs(character);
-            if (views.length < MAX_REFS_PER_CHAR) {
-                if (!views.some(v => v.url === persistedUrl)) {
-                    views.push({
+            await updateCharacterRefs(character, views => {
+                ensureSource();
+                if (views.length < MAX_REFS_PER_CHAR && !views.some(v => v.url === persistedUrl)) {
+                    addedToRefs = true;
+                    return [...views, {
                         url: persistedUrl,
                         label: `${label} · ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
-                    });
-                    await saveCharacterRefs(character, views);
-                    addedToRefs = true;
+                    }];
                 }
-            }
+                return views;
+            });
         }
         if (isPersisted) {
             try {
@@ -1987,7 +2080,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.57</span>
+            <span class="rpig-header-version">v2.9.61</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2504,8 +2597,12 @@ function buildSettingsUI() {
         updateCharacterDetails();
     }
 
+    let characterDetailsVersion = 0;
     async function updateCharacterDetails() {
+        const version = ++characterDetailsVersion;
         const liveChar = getCurrentCharacter();
+        refsList.empty().append($('<div class="rpig-ref-empty">').text('正在读取参考图…'));
+        void refreshRefsList();
         if (!liveChar) {
             charSummaryBox.hide();
             return;
@@ -2513,14 +2610,17 @@ function buildSettingsUI() {
         charSummaryBox.show();
         const displayName = (s.selectedTargetCharacter === 'auto' ? '🌟 [当前聊天] ' : '') + (liveChar.name || '角色');
         charSummaryBox.find('.rpig-summary-name').text(displayName);
+        charSummaryBox.find('.rpig-summary-avatar').hide();
 
-        const avatarData = await getCharacterAvatarDataUrl(liveChar);
+        let avatarData = null;
+        try { avatarData = await getCharacterAvatarDataUrl(liveChar); }
+        catch (error) { console.warn('[RP 电影配图] 头像预览不可用:', scrubSensitiveText(error.message)); }
+        if (version !== characterDetailsVersion || getCharacterIdentifier(liveChar) !== getCharacterIdentifier(getCurrentCharacter())) return;
         if (avatarData) {
             charSummaryBox.find('.rpig-summary-avatar').attr('src', avatarData).show();
         } else {
             charSummaryBox.find('.rpig-summary-avatar').hide();
         }
-        refreshRefsList();
     }
 
     window.rpigRefreshCharacterUI = () => { updateCharacterSelectorUI(); };
@@ -2573,15 +2673,19 @@ function buildSettingsUI() {
     const refsList = $(document.createElement('div')).addClass('rpig-refs-list');
     const refsEmpty = $(document.createElement('div')).addClass('rpig-ref-empty').text('此设备/浏览器暂无多视图参考图。IndexedDB 不会跨设备同步；请上传原图，或从另一设备导出参考图后导入。');
 
+    let refsRefreshVersion = 0;
     async function refreshRefsList() {
+        const version = ++refsRefreshVersion;
         const liveChar = getCurrentCharacter();
         let views;
         try { views = liveChar ? await getCharacterRefs(liveChar) : []; }
         catch (error) {
+            if (version !== refsRefreshVersion || getCharacterIdentifier(liveChar) !== getCharacterIdentifier(getCurrentCharacter())) return;
             refsList.empty().append($('<div class="rpig-ref-empty">').text(error.message));
             toastr.error(escapeHtml(error.message));
             return;
         }
+        if (version !== refsRefreshVersion || getCharacterIdentifier(liveChar) !== getCharacterIdentifier(getCurrentCharacter())) return;
         refsList.empty();
         if (!views.length) {
             refsList.append(refsEmpty);
@@ -2599,11 +2703,9 @@ function buildSettingsUI() {
                 }
                 primaryBtn.on('click', async (e) => {
                     e.stopPropagation();
-                    const willBePrimary = !view.isPrimaryIdentity;
-                    views.forEach(v => { v.isPrimaryIdentity = false; });
-                    view.isPrimaryIdentity = willBePrimary;
                     try {
-                        await saveCharacterRefs(liveChar, views);
+                        const updated = await updateCharacterRefs(liveChar, current => modifyReferenceViews(current, view, 'primary'));
+                        const willBePrimary = updated.some(v => v.isPrimaryIdentity && (v.url || v.dataUrl) === (view.url || view.dataUrl) && v.label === view.label);
                         await refreshRefsList();
                         if (willBePrimary) {
                             toastr.success(`已将「${view.label || `视图 ${index + 1}`}」设为主身份参考`);
@@ -2618,9 +2720,8 @@ function buildSettingsUI() {
                 const del = $('<button title="删除参考图">✕</button>');
                 del.on('click', async (e) => {
                     e.stopPropagation();
-                    views.splice(index, 1);
                     try {
-                        await saveCharacterRefs(liveChar, views);
+                        await updateCharacterRefs(liveChar, current => modifyReferenceViews(current, view, 'remove'));
                         await refreshRefsList();
                     } catch (e) {
                         toastr.error(`删除参考图失败：${escapeHtml(e.message)}`);
@@ -2628,10 +2729,16 @@ function buildSettingsUI() {
                 });
                 const purpose = $('<select aria-label="参考图用途">').append('<option value="single">单视图</option><option value="full_body">完整立绘</option><option value="three_views">三视图/设计稿</option><option value="face_crop">主图脸部特写</option>');
                 purpose.val(view.viewType || (/三视|three_views|turnaround/i.test(view.label || '') ? 'three_views' : 'single'));
-                purpose.on('change', async () => { view.viewType = purpose.val(); await saveCharacterRefs(liveChar, views); });
+                purpose.on('change', async () => {
+                    try { await updateCharacterRefs(liveChar, current => modifyReferenceViews(current, view, 'viewType', purpose.val())); }
+                    catch (error) { toastr.error(`参考图用途保存失败：${escapeHtml(error.message)}`); await refreshRefsList(); }
+                });
                 const enabled = $('<input type="checkbox">').attr('aria-label', `使用参考图 ${view.label || index + 1}`)
                     .prop('checked', view.isPrimaryIdentity || view.enabled !== false).prop('disabled', !!view.isPrimaryIdentity);
-                enabled.on('change', async () => { view.enabled = enabled.prop('checked'); await saveCharacterRefs(liveChar, views); });
+                enabled.on('change', async () => {
+                    try { await updateCharacterRefs(liveChar, current => modifyReferenceViews(current, view, 'enabled', enabled.prop('checked'))); }
+                    catch (error) { toastr.error(`参考图状态保存失败：${escapeHtml(error.message)}`); await refreshRefsList(); }
+                });
                 item.append(img, primaryBtn, label, purpose, $('<label>').append(enabled, ' 使用本图'), del);
                 refsList.append(item);
             });
@@ -2698,21 +2805,15 @@ function buildSettingsUI() {
                     return;
                 }
                 if (liveChar) {
-                    const views = await getCharacterRefs(liveChar);
-                    if (views.length >= MAX_REFS_PER_CHAR) {
-                        toastr.warning(`参考图数量已达上限 (${MAX_REFS_PER_CHAR} 张)`);
-                        return;
-                    }
-                    if (views.some(v => v.url === res.persistedUrl)) {
-                        toastr.info('该参考图已在列表中');
+                    try {
+                        await updateCharacterRefs(liveChar, views => views.some(v => v.url === res.persistedUrl) ? views
+                            : mergeReferenceViews(views, [{ url: res.persistedUrl, label: (type === 'three_views' ? '📐 图生图三视图' : '🧍 图生图全身立绘') }], MAX_REFS_PER_CHAR));
+                        await refreshRefsList();
                         addBtn.text('✅ 已加入参考图').prop('disabled', true).css('opacity', '0.7');
-                        return;
+                        toastr.success(`已加入「${liveChar.name || '角色'}」参考图`);
+                    } catch (error) {
+                        toastr.error(`加入参考图失败：${escapeHtml(error.message)}`);
                     }
-                    views.push({ url: res.persistedUrl, label: (type === 'three_views' ? '📐 图生图三视图' : '🧍 图生图全身立绘') });
-                    await saveCharacterRefs(liveChar, views);
-                    refreshRefsList();
-                    addBtn.text('✅ 已加入参考图').prop('disabled', true).css('opacity', '0.7');
-                    toastr.success(`已加入「${liveChar.name || '角色'}」参考图`);
                 }
             });
 
@@ -2766,12 +2867,7 @@ function buildSettingsUI() {
             if (files.reduce((total, file) => total + file.size, 0) > MAX_REFERENCE_ARCHIVE_BYTES) throw new Error('本次导入总大小超过 30MB，请分批导入');
             const imported = [];
             for (const file of files) imported.push(...await readReferenceImport(file));
-            const existing = await getCharacterRefs(character);
-            if (existing.length + imported.length > MAX_REFS_PER_CHAR) throw new Error('导入后将超过 50 张参考图上限，请先整理参考图');
-            // 上传新参考图或导入不能悄悄替换已指定的主身份图
-            const hasExistingPrimary = existing.some(v => v.isPrimaryIdentity);
-            const safeImported = imported.map(v => (hasExistingPrimary && v.isPrimaryIdentity ? { ...v, isPrimaryIdentity: false } : v));
-            await saveCharacterRefs(character, [...existing, ...safeImported]);
+            await updateCharacterRefs(character, existing => mergeReferenceViews(existing, imported, MAX_REFS_PER_CHAR));
             await refreshRefsList(); toastr.success(`已导入 ${imported.length} 张参考图`);
         } catch (error) { console.error('[RP 电影配图] 参考图导入失败:', error); toastr.error(escapeHtml(error.message)); }
         finally { this.value = ''; }
@@ -2798,16 +2894,20 @@ function buildSettingsUI() {
         return String(currentContext?.name1 || [...(currentContext?.chat || [])].reverse().find(message => message?.is_user)?.name || 'User').trim();
     }
 
+    let userRefsRefreshVersion = 0;
     async function refreshUserRefsList() {
+        const version = ++userRefsRefreshVersion;
         const displayName = currentUserDisplayName();
         userRefsTitle.text(`👤 User 三视图 / 多视角参考图 · ${displayName}`);
         let views;
         try { views = await getCharacterRefs('user'); }
         catch (error) {
+            if (version !== userRefsRefreshVersion) return;
             userRefsList.empty().append($('<div class="rpig-ref-empty">').text(error.message));
             toastr.error(escapeHtml(error.message));
             return;
         }
+        if (version !== userRefsRefreshVersion) return;
         userRefsList.empty();
         if (!views.length) {
             userRefsList.append($('<div class="rpig-ref-empty">').text(`尚未上传 ${displayName} 的三视图或多视角参考图。`));
@@ -2826,11 +2926,9 @@ function buildSettingsUI() {
             }
             primaryBtn.on('click', async (e) => {
                 e.stopPropagation();
-                const willBePrimary = !view.isPrimaryIdentity;
-                views.forEach(v => { v.isPrimaryIdentity = false; });
-                view.isPrimaryIdentity = willBePrimary;
                 try {
-                    await saveCharacterRefs('user', views);
+                    const updated = await updateCharacterRefs('user', current => modifyReferenceViews(current, view, 'primary'));
+                    const willBePrimary = updated.some(v => v.isPrimaryIdentity && (v.url || v.dataUrl) === (view.url || view.dataUrl) && v.label === view.label);
                     await refreshUserRefsList();
                     if (willBePrimary) {
                         toastr.success(`已将「${view.label || `User 视图 ${index + 1}`}」设为 User 主身份参考`);
@@ -2845,9 +2943,8 @@ function buildSettingsUI() {
             const del = $('<button title="删除 User 参考图">✕</button>');
             del.on('click', async (e) => {
                 e.stopPropagation();
-                views.splice(index, 1);
                 try {
-                    await saveCharacterRefs('user', views);
+                    await updateCharacterRefs('user', current => modifyReferenceViews(current, view, 'remove'));
                     await refreshUserRefsList();
                 } catch (error) {
                     toastr.error(`删除 User 参考图失败：${escapeHtml(error.message)}`);
@@ -2869,11 +2966,7 @@ function buildSettingsUI() {
             if (files.reduce((total, file) => total + file.size, 0) > MAX_REFERENCE_ARCHIVE_BYTES) throw new Error('本次导入总大小超过 30MB，请分批导入');
             const imported = [];
             for (const file of files) imported.push(...await readReferenceImport(file));
-            const existing = await getCharacterRefs('user');
-            if (existing.length + imported.length > MAX_REFS_PER_CHAR) throw new Error('导入后将超过 50 张 User 参考图上限，请先整理参考图');
-            const hasExistingUserPrimary = existing.some(v => v.isPrimaryIdentity);
-            const safeUserImported = imported.map(v => (hasExistingUserPrimary && v.isPrimaryIdentity ? { ...v, isPrimaryIdentity: false } : v));
-            await saveCharacterRefs('user', [...existing, ...safeUserImported]);
+            await updateCharacterRefs('user', existing => mergeReferenceViews(existing, imported, MAX_REFS_PER_CHAR));
             await refreshUserRefsList();
             toastr.success(`已导入 ${imported.length} 张 User 参考图`);
         } catch (error) {
@@ -2904,6 +2997,22 @@ function buildSettingsUI() {
     card6.body.append(userRefsBox);
     grid.append(card6.card);
 
+    // 错误报告只在用户点击时下载到本机，文字诊断由用户明确选择。
+    const reportCard = createCard('错误报告', '🧾');
+    const reportIncludeText = $('<input type="checkbox" id="rpig-error-report-include-text">')
+        .prop('checked', s.errorReportIncludeText === true);
+    reportIncludeText.on('change', () => {
+        s.errorReportIncludeText = reportIncludeText.prop('checked') === true;
+        saveSettingsDebounced();
+    });
+    reportCard.body.append(switchRow('附带文字诊断（含剧情与提示词）', reportIncludeText,
+        '默认关闭。开启后会附带脱敏后的文字诊断，仍不包含图片及参考图地址；分享前请检查内容。'));
+    const reportExportButton = $('<button type="button" class="menu_button" id="rpig-settings-export-error-report">🧾 导出错误报告</button>');
+    reportExportButton.on('click', exportErrorReport);
+    reportCard.body.append(row('', reportExportButton,
+        '默认导出不含剧情、提示词、角色名、密钥、图片或接口地址。合并最近 5 条诊断与当前聊天近期记录，最多 10 条，仅下载到本机。'));
+    grid.append(reportCard.card);
+
     container.append(grid);
     setTimeout(() => { updateCharacterSelectorUI(); refreshUserRefsList(); }, 100);
 
@@ -2915,7 +3024,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.57</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.61</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -2992,6 +3101,9 @@ function buildFloatingUI() {
             <button class="menu_button rpig-btn-action-primary" id="rpig-gen-now" title="以当前所选镜头立即生成当前轮配图">🪄 立即出图</button>
             <button class="menu_button" id="rpig-gallery-btn" title="查看当前角色历史图片">📚 角色图库</button>
             <button class="menu_button" id="rpig-open-settings" title="打开扩展详细设置抽屉">⚙ 设置</button>
+        </div>
+        <div class="rpig-fab-btns">
+            <button type="button" class="menu_button" id="rpig-export-error-report" title="下载错误报告；是否附带文字诊断由设置里的选项控制">🧾 导出错误报告</button>
         </div>
     </div>`);
 
@@ -3288,6 +3400,7 @@ function buildFloatingUI() {
     });
 
     $('#rpig-open-settings').on('click', openSettingsPanel);
+    $('#rpig-export-error-report').on('click', exportErrorReport);
     window.rpigFloatingCleanup?.();
     window.rpigFloatingCleanup = keepFloatingUIVisible(fab[0], panel[0]);
 }
@@ -3325,7 +3438,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.57</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.61</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -3387,6 +3500,7 @@ jQuery(async function () {
     });
 
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        rpigOverlays.closeAll();
         rpigImageRetryCache.clear();
         for (const controller of rpigDetailEditorControllers) controller.abort(createAbortError('会话已切换'));
         rpigActiveTask?.controller.abort(createAbortError('会话已切换'));
@@ -3417,5 +3531,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.57] User 三视图、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.61] User 三视图、结构化焦点分析与完整工作台已启用。');
 });
