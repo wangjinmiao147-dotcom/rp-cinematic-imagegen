@@ -9,7 +9,7 @@ import { downloadDiagnosticReport } from './src/diagnostic-report.js';
 import { captureChatSource, isChatSourceCurrent, captureMessageSource, isMessageSourceCurrent, snapshotGenerationSettings } from './src/task-context.js';
 import { mergeReferenceViews, modifyReferenceViews } from './src/reference-state.js';
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.61
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.62
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -99,7 +99,7 @@ import { resolveCastReferencePlan } from './src/character-identities.js';
 // 常量定义与默认设置
 // ------------------------------------------------------------
 const extensionName = 'rp-cinematic-imagegen';
-const pluginVersion = '2.9.61';
+const pluginVersion = '2.9.62';
 
 const defaultSettings = {
     // 图片后端
@@ -1365,13 +1365,13 @@ async function executeGenerationTask(task) {
                 characterDesignContext: participantContext,
             });
             taskDiagnostics.stage = 'instruction';
-            let step3Raw = await callLLM(step3Prompt.system, step3Prompt.userText, getFinalizerLlmSettings(s), getContext, { signal, jsonMode: true, onFallback: onLocalFallback(3), validateResponse: raw => parseAnalysisResponse(raw, 3, { latestStory: capturedMes || '', expectedCharacterNames: visibleCharacters }) });
+            let step3Raw = await callLLM(step3Prompt.system, step3Prompt.userText, getFinalizerLlmSettings(s), getContext, { signal, jsonMode: true, onFallback: onLocalFallback(3), validateResponse: raw => parseAnalysisResponse(raw, 3, { latestStory: capturedMes || '' }) });
             if (!isSessionStillValid()) {
                 toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                 return;
             }
             taskDiagnostics.step3Raw = step3Raw;
-            let editJson = parseAnalysisResponse(step3Raw, 3, { latestStory: capturedMes || '', expectedCharacterNames: visibleCharacters,
+            let editJson = parseAnalysisResponse(step3Raw, 3, { latestStory: capturedMes || '',
                 onNormalization: notes => { taskDiagnostics.step3Normalization = notes; } });
             step3RawText = step3Raw;
             taskDiagnostics.step3Raw = step3Raw;
@@ -1467,7 +1467,7 @@ async function executeGenerationTask(task) {
             }
             if (!cached?.confirmedPrompt) {
                 const bubbleException = hasRequestedThoughtBubble(prompt) ? ' The requested same-person avatar inside the thought bubble is symbolic, not another physical cast member.' : '';
-                prompt += `\nVISIBLE CAST (${visibleCharacters.length}): ${visibleCharacters.join(', ') || 'none'}. Each listed person has one physical body in the main scene, within their specified visible range.${bubbleException} References do not add people.`;
+                prompt += `\nVISIBLE CAST (${visibleCharacters.length}): ${visibleCharacters.join(', ') || 'none'}. Each listed person has one physical body in the main scene, within their specified visible range.${bubbleException} Aliases, translated names and clear pronouns in the instructions refer to these same identities, not additional people. References do not add people.`;
             }
 
             const continuityReferenceAllowed = s.usePreviousImage !== false
@@ -2080,7 +2080,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.61</span>
+            <span class="rpig-header-version">v2.9.62</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -3024,7 +3024,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.61</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.62</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -3438,7 +3438,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.61</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.62</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -3531,5 +3531,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.61] User 三视图、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.62] User 三视图、结构化焦点分析与完整工作台已启用。');
 });

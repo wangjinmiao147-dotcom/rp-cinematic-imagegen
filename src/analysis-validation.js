@@ -243,10 +243,9 @@ export function parseAnalysisResponse(raw, stage, options = {}) {
     if (stage === 3 && options.latestStory !== undefined) requireShape(typeof value.preserve === 'string' && stringArray(value.exclude), '编辑指令必须包含 preserve 和 exclude');
     if (stage === 1) assertUsableInstruction(value.moment, '剧情事实');
     if (stage === 3) assertUsableInstruction(value.edit_instruction, '英文编辑指令');
-    if (stage === 3 && Array.isArray(options.expectedCharacterNames)) {
-        const missing = [...new Set(options.expectedCharacterNames.filter(name => typeof name === 'string' && name.trim()))]
-            .filter(name => !value.edit_instruction.includes(name));
-        if (missing.length) throw new RpigError('ANALYSIS_IDENTITY_MISMATCH', '第 3 步没有保留已核对的规范人物姓名，已停止生图：' + missing.join('、'));
-    }
+    // Free-form wording is not a reliable identity check: aliases, translations,
+    // pronouns and spelling variations can refer to the same verified actor.
+    // The editor model receives the cast and action ownership; reference lookup
+    // remains bound to the validated stage-2 cast, never names found in this prose.
     return value;
 }

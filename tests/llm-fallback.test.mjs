@@ -65,14 +65,19 @@ test('JSON compatibility retry shares a single primary deadline',async()=>{
   });assert.equal(signals.length,2);assert.equal(signals[0],signals[1]);
 });
 
-test('a translated canonical identity triggers only this stage to retry locally',async()=>{
-  let calls=0;const encode=name=>JSON.stringify({edit_instruction:name+' points at one key with her left hand.',preserve:'',exclude:[],thought_bubble_instruction:''});
-  await withFetch(async()=>reply(encode(++calls===1?'Lin Lan':'林岚')),async()=>{
-    const raw=await callLLM('system','original scene',settings,null,{validateResponse:raw=>parseAnalysisResponse(raw,3,{latestStory:'林岚左手指着一把钥匙。',expectedCharacterNames:['林岚']})});
-    assert.match(raw,/林岚/);
-  });assert.equal(calls,2);
-});
-test('a name mentioned only in exclusions cannot satisfy a visible actor identity',()=>{
-  const raw=JSON.stringify({edit_instruction:'A woman points at the key.',preserve:'',exclude:['林岚'],thought_bubble_instruction:''});
-  assert.throws(()=>parseAnalysisResponse(raw,3,{latestStory:'林岚左手指着钥匙。',expectedCharacterNames:['林岚']}),e=>e.code==='ANALYSIS_IDENTITY_MISMATCH');
+for(const name of ['Lin Lan','林澜']) {
+  test(`stage-three identity wording (${name}) does not cause an unnecessary local retry`,async()=>{
+    const calls=[];
+    const instruction=name+' points at one key with her left hand.';
+    const encoded=JSON.stringify({edit_instruction:instruction,preserve:'',exclude:[],thought_bubble_instruction:''});
+    await withFetch(async url=>{calls.push(url);return reply(encoded);},async()=>{
+      const raw=await callLLM('system','original scene',settings,null,{validateResponse:raw=>parseAnalysisResponse(raw,3,{latestStory:'林岚左手指着一把钥匙。',expectedCharacterNames:['林岚']})});
+      assert.equal(JSON.parse(raw).edit_instruction,instruction);
+    });assert.deepEqual(calls,['http://primary.test/v1/chat/completions']);
+  });
+}
+test('a clear single-person instruction does not need a literal name to pass format validation',()=>{
+  const raw=JSON.stringify({edit_instruction:'A woman points at the key with her left hand.',preserve:'',exclude:[],thought_bubble_instruction:''});
+  const parsed=parseAnalysisResponse(raw,3,{latestStory:'林岚左手指着钥匙。',expectedCharacterNames:['林岚']});
+  assert.equal(parsed.edit_instruction,'A woman points at the key with her left hand.');
 });

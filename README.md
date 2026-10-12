@@ -2,7 +2,7 @@
 
 面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的角色扮演配图扩展，依据当前剧情、实际入镜人物和各自参考图生成剧情剧照、表情特写、角色设计图，在聊天与图库中管理结果。
 
-当前版本：**v2.9.61**（2026-10-12），基于 v2.9.57 的维护修复与错误报告更新。MIT 许可证；由 RP 电影配图 contributors 维护。模型与依赖出处见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+当前版本：**v2.9.62**（2026-10-12），基于 v2.9.57 的维护修复与错误报告更新。MIT 许可证；由 RP 电影配图 contributors 维护。模型与依赖出处见 [第三方说明](THIRD_PARTY_NOTICES.md)。
 
 ![v2.9.57 发布版工作台示意](docs/images/public-workbench-v2.9.57.png)
 
@@ -10,15 +10,17 @@
 
 ## 本次维护修复
 
+v2.9.62 修复第 3 步人物姓名误判：英文指令不再逐字匹配规范姓名，由模型依据已核对的演员表、别名和动作关系判断对应人物。译名、称呼、轻微错字或清楚的单人代词不会仅因写法差异停图或触发本地回退；参考图继续按第 2 步确认的身份绑定，不新增模型调用。
+
 已修复参考图读取兼容、并发图库保存、自动检测取消竞态、排队消息身份失效、角色形象默认参考模式、ComfyUI 上传和执行失败处理，以及图库窗口跨会话失效。参考图采用稳定记录标识与原子修改，普通生图、局部精修和角色形象共用任务队列。详见 [v2.9.60 修复说明](docs/RELEASE_v2.9.60.md)。
 
-完整更新见 [v2.9.61 发布说明](docs/RELEASE_v2.9.61.md)，安装包见 [v2.9.61 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.61)。
+完整更新见 [v2.9.62 发布说明](docs/RELEASE_v2.9.62.md)，安装包见 [v2.9.62 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.62)。
 
 ## 一键导出错误报告
 
 在设置的“错误报告”卡片或悬浮工作台点击“导出错误报告”，浏览器会下载本地 JSON 文件。报告整理最近诊断和当前聊天最近消息中的生成诊断，最多 10 条，包含版本、后端类型、失败阶段、错误码、总耗时、尺寸及参考图数量。普通生图、角色形象、局部精修和自动场景分析失败均可记录。
 
-默认不含剧情、提示词、角色名、原始服务错误、密钥、图片、接口地址、模型名和本机路径；仅手动开启“附带文字诊断（含剧情与提示词）”后才附带已脱敏的文字。图片与参考图内容始终不导出；报告只下载到本机，不自动上传或发送。没有历史诊断时也能导出配置概况。本地存储被禁用时，当前页面会保留最近诊断；刷新后只能读取仍在聊天或存储中的记录。详见 [v2.9.61 说明](docs/RELEASE_v2.9.61.md)。
+默认不含剧情、提示词、角色名、原始服务错误、密钥、图片、接口地址、模型名和本机路径；仅手动开启“附带文字诊断（含剧情与提示词）”后才附带已脱敏的文字。图片与参考图内容始终不导出；报告只下载到本机，不自动上传或发送。没有历史诊断时也能导出配置概况。本地存储被禁用时，当前页面会保留最近诊断；刷新后只能读取仍在聊天或存储中的记录。详见 [v2.9.62 说明](docs/RELEASE_v2.9.62.md)。
 
 ## 安装
 
@@ -32,13 +34,13 @@
 
 ### ZIP 手动安装
 
-1. 从 [v2.9.61 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.61) 下载 `rp-cinematic-imagegen-v2.9.61.zip`。
+1. 从 [v2.9.62 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.62) 下载 `rp-cinematic-imagegen-v2.9.62.zip`。
 2. 解压得到 `rp-cinematic-imagegen` 文件夹，放入 `<SillyTavern 根目录>/data/<用户>/extensions/`（默认用户为 `default-user`）。
 3. 刷新页面并启用扩展。避免解压成扩展目录内的第二层同名文件夹。
 
 ### 酒馆助手安装器
 
-已安装酒馆助手（JS-Slash-Runner）的用户可下载同一 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.61.json`，在“酒馆助手 → 脚本库”导入为全局脚本并确认启用，使用“安装 / 更新 RP 电影配图”按钮。
+已安装酒馆助手（JS-Slash-Runner）的用户可下载同一 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.62.json`，在“酒馆助手 → 脚本库”导入为全局脚本并确认启用，使用“安装 / 更新 RP 电影配图”按钮。
 
 JSON 是安装器，实际运行的是原生扩展。安装器先安装正式目录，再处理旧目录 `rp-cinematic-v2`；配置键仍为 `rp-cinematic-imagegen`，优先保留已有正式设置。迁移前可备份酒馆数据，不要公开备份或密钥。
 
@@ -72,7 +74,7 @@ JSON 是安装器，实际运行的是原生扩展。安装器先安装正式目
 
 云端密钥不会发送给本地回退接口。启用后，当前阶段的剧情和分析输入会发送给你配置的回退地址。
 
-源码在 `tools/local-scene-llm`，Release 同时提供独立 `rp-cinematic-local-scene-llm-v2.9.61.zip`。Windows + NVIDIA 环境已验证，其他系统与显卡尚未验证。模型来源、校验值、标签导入、端口、资源限制和启动参数见 [本地服务安装说明](tools/local-scene-llm/README.md)。
+源码在 `tools/local-scene-llm`，Release 同时提供独立 `rp-cinematic-local-scene-llm-v2.9.62.zip`。Windows + NVIDIA 环境已验证，其他系统与显卡尚未验证。模型来源、校验值、标签导入、端口、资源限制和启动参数见 [本地服务安装说明](tools/local-scene-llm/README.md)。
 
 代理默认仅监听 `127.0.0.1:11436`，连接本机 Ollama `127.0.0.1:11434`，仅允许酒馆 `localhost:8000` / `127.0.0.1:8000` 的跨域来源。其他酒馆端口需修改 `allowedOrigins`。手机的 `127.0.0.1` 是手机自身，默认方案不能直接供手机远程连接。
 

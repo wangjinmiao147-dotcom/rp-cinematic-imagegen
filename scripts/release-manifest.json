@@ -52,7 +52,8 @@
     "docs/RELEASE_v2.9.60.md",
     "src/diagnostic-report.js",
     "src/diagnostic-text.js",
-    "docs/RELEASE_v2.9.61.md"
+    "docs/RELEASE_v2.9.61.md",
+    "docs/RELEASE_v2.9.62.md"
   ],
   "localServiceFiles": [
     "local-scene-llm.mjs",

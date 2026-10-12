@@ -29,7 +29,7 @@ export function loadConfig(configPath=''){
 export function makeNativeRequest(input,config){
     if(input.model!==config.model&&input.model!==config.model+':latest')throw Error('请使用已配置的本地剧情模型：'+config.model);
     if(!Array.isArray(input.messages)||!input.messages.length||input.messages.some(m=>!['system','user','assistant'].includes(m.role)||typeof m.content!=='string'))throw Error('剧情消息格式不正确');
-    const check='【本地剧情分析输出前复核】人物规范姓名逐字保留中文，不翻译或拼音化；英文指令的专名也逐字复制 visible_characters 的 canonical_name，只有其余描述译为英文。身体在场证据引用包含该人物身份和当前身体动作的完整连续原文。保留否定、先后、左右手和可见范围，区分物品总数与各人的持物数量。指向、伸手、持有和已完成交接不能互换；指向不证明触碰，没有身体接触依据时不能写接触。前、侧、背只是观察方向，不证明半身或特写。剧情模式未指定局部裁切时按原规则完整主角从头到脚入画，保留头饰和脚边余量；已有的局部入镜限制仍优先。不能自创人物画面左右位置。保留项和排除项不能互相矛盾。只在最终回答输出原任务规定的 JSON。';
+    const check='【本地剧情分析输出前复核】依据演员表、别名、上下文与动作归属自行判断人物对应，优先用规范姓名帮助参考图匹配；别名、合理译名、清楚的代词或轻微拼写变化不代表新人物，多人时避免含糊代词交换动作。结构化身份字段仍按当前协议填写，动作与场景描述使用英文。身体在场证据引用包含该人物身份和当前身体动作的完整连续原文。保留否定、先后、左右手和可见范围，区分物品总数与各人的持物数量。指向、伸手、持有和已完成交接不能互换；指向不证明触碰，没有身体接触依据时不能写接触。前、侧、背只是观察方向，不证明半身或特写。剧情模式未指定局部裁切时按原规则完整主角从头到脚入画，保留头饰和脚边余量；已有的局部入镜限制仍优先。不能自创人物画面左右位置。保留项和排除项不能互相矛盾。只在最终回答输出原任务规定的 JSON。';
     const messages=input.messages.map(m=>['system','user'].includes(m.role)?{...m,content:m.content+'\n\n'+check}:m);
     const adapter=sceneAdapter(input);
     if(adapter)for(const message of messages)if(['system','user'].includes(message.role))message.content+='\n\n'+adapter.protocol;

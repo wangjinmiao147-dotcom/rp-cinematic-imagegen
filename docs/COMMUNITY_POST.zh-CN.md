@@ -1,10 +1,10 @@
-# RP 电影配图 v2.9.61：维护修复与一键错误报告
+# RP 电影配图 v2.9.62：维护修复与一键错误报告
 
 这是一个 MIT 开源的 SillyTavern 前端扩展。先提取当前剧情事实，核对实际入镜人物、动作归属和空间关系，再生成英文图像编辑指令；结合每个人物自己的参考图生成剧照、表情特写和角色设计图。
 
 仓库：[RP 电影配图](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen)
 
-下载：[v2.9.61 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.61)
+下载：[v2.9.62 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.62)
 
 ![公开演示工作台](images/public-workbench-v2.9.57.png)
 

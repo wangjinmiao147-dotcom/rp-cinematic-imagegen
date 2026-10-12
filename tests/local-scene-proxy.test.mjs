@@ -8,9 +8,9 @@ const config=JSON.parse(fs.readFileSync(new URL('../tools/local-scene-llm/local-
 const input={model:config.model,messages:[{role:'system',content:'完整原有规则'},{role:'user',content:'夏禾左手指着钥匙；周禾右手握两把。'}],response_format:{type:'json_object'}};
 test('the proxy preserves full Unicode story and instructions, releases the GPU and requests complete JSON',()=>{
   const body=makeNativeRequest(input,config);
-  assert.ok(body.messages[0].content.startsWith(input.messages[0].content+'\n\n'));assert.match(body.messages[0].content,/规范姓名逐字保留中文/);
+  assert.ok(body.messages[0].content.startsWith(input.messages[0].content+'\n\n'));assert.match(body.messages[0].content,/依据演员表、别名、上下文与动作归属自行判断人物对应/);
   assert.equal(body.messages[1].role,input.messages[1].role);assert.ok(body.messages[1].content.startsWith(input.messages[1].content+'\n\n'));
-  assert.match(body.messages[1].content,/指向不证明触碰/);assert.match(body.messages[1].content,/只有其余描述译为英文/);assert.match(body.messages[1].content,/已有的局部入镜限制仍优先/);
+  assert.match(body.messages[1].content,/指向不证明触碰/);assert.match(body.messages[1].content,/结构化身份字段仍按当前协议填写/);assert.match(body.messages[1].content,/已有的局部入镜限制仍优先/);
   assert.equal(body.keep_alive,0);assert.equal(body.stream,false);assert.equal(body.format,'json');
   assert.equal(body.options.num_ctx,16384);assert.equal(body.options.num_batch,config.numBatch);assert.equal(body.think,config.think);
 });

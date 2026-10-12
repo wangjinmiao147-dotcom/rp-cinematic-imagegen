@@ -37,7 +37,7 @@ function fixture({ clock = null } = {}) {
         setGenStatus:()=>{},toastr:Object.fromEntries(['info','warning','success','error'].map(type=>[type,(message,_title,options)=>state.toasts.push({type,message,options})])),
         buildDialogueContext:chat=>chat.map(m=>m.mes).join('\n'),buildParticipantContext:()=> 'participants',getCharacterVisualAnchor:()=>character.description,
         buildDirectorPrompt:()=>({system:'director',userText:'test'}),buildOmniscientPrompt:()=>({system:'omniscient',userText:'test'}),buildFinalizerPrompt:()=>({system:'finalizer',userText:'test'}),
-        buildStoryFactsPrompt:()=>({system:'facts',userText:'test'}),buildRelationCheckerPrompt:options=>{state.relationDesign=options.characterDesignContext;return {system:'relation',userText:'test'};},buildEditInstructionPrompt:options=>{state.editorDesign=options.characterDesignContext;return {system:'edit',userText:'test'};},assembleUnifiedPrompt,
+        buildStoryFactsPrompt:()=>({system:'facts',userText:'test'}),buildRelationCheckerPrompt:options=>{state.relationDesign=options.characterDesignContext;return {system:'relation',userText:'test'};},buildEditInstructionPrompt:options=>{state.editorDesign=options.characterDesignContext;state.editorCast=options.castAndSpatialFacts;return {system:'edit',userText:'test'};},assembleUnifiedPrompt,
         persistGenerationDiagnostics:diagnostic=>sanitizeDiagnostics(diagnostic),
         callLLM:async (system)=>{
             state.textCalls++;
@@ -57,10 +57,10 @@ function fixture({ clock = null } = {}) {
             }
             if (system === 'relation') {
                 return JSON.stringify({visible_characters:state.invalidCast?[null]:[{canonical_name:'Test',presence_evidence:message.mes,visible_scope:null}],
-                    mentioned_only_characters:[],aliases:{},spatial_relations:[],action_ownership:[],conflicts:[]});
+                    mentioned_only_characters:[],aliases:{},spatial_relations:[],action_ownership:[],conflicts:[],...state.relationOverrides});
             }
             if (system === 'edit') {
-                return JSON.stringify({ edit_instruction: (state.visibleCharacters || ['Test']).join(' and ') + ': User edited final prompt', preserve: '', exclude: state.exclude || [] });
+                return JSON.stringify({ edit_instruction: state.editInstruction ?? ((state.visibleCharacters || ['Test']).join(' and ') + ': User edited final prompt'), preserve: '', exclude: state.exclude || [] });
             }
             return 'Final analyzed prompt';
         },
@@ -81,6 +81,61 @@ function fixture({ clock = null } = {}) {
         return testRes || res;
     }};
 }
+
+for (const wording of ['Lin Lan', '小岚', '林澜', 'She']) {
+    test(`production generation accepts ${wording} while keeping the verified character and reference identity`, async()=>{
+        const f=fixture();
+        f.character.name='林岚';f.message.name='林岚';f.message.mes='林岚站在门边，左手指着一把钥匙。';
+        f.settings.stylePreset='reference';f.settings.previewBeforeGeneration=false;f.state.failImage=false;
+        f.state.visibleCharacters=['林岚'];
+        f.state.factOverrides={actions:[{character:'林岚',action:'左手指着一把钥匙',expression:null,gaze:null,contact:null}]};
+        f.state.relationOverrides={visible_characters:[{canonical_name:'林岚',presence_evidence:f.message.mes,visible_scope:null}],
+            aliases:{小岚:'林岚'},action_ownership:['林岚左手指着一把钥匙']};
+        f.state.refs=[{url:'/lin-identity.png',label:'Lin identity',isPrimaryIdentity:true}];
+        f.state.editInstruction=`${wording} stands by the door and points at one key with her left hand.`;
+        assert.equal((await f.run()).success,true);
+        assert.equal(f.state.textCalls,3,'No extra identity repair or model call is added');
+        assert.deepEqual(f.state.editorCast.aliases,{小岚:'林岚'});
+        assert.equal(f.state.imageCalls.length,1);
+        assert.match(f.state.imageCalls[0].prompt,/VISIBLE CAST \(1\): 林岚/);
+        assert.ok(f.state.imageCalls[0].prompt.includes(f.state.editInstruction));
+        assert.equal(f.state.imageCalls[0].refs[0].identityId,'character:test.png');
+        assert.equal(f.state.imageCalls[0].refs[0].identityName,'林岚');
+        assert.equal(f.state.imageCalls[0].refs[0].url,'/lin-identity.png');
+        assert.equal(f.message.extra.rpigLastAttempt.errorCode,null);
+    });
+}
+
+test('two translated actors keep separate stage-two card references and partial-body context',async()=>{
+    const f=fixture();
+    f.character.name='林岚';f.message.name='林岚';f.message.mes='林岚伸手，周禾只露出右手递来一把钥匙。';
+    const other={name:'周禾',avatar:'zhou.png'};
+    f.state.characters=[f.character,other];f.state.visibleCharacters=['林岚','周禾'];
+    f.settings.stylePreset='reference';f.settings.previewBeforeGeneration=false;f.state.failImage=false;
+    f.state.factOverrides={actions:[{character:'林岚',action:'伸手',expression:null,gaze:null,contact:null},
+        {character:'周禾',action:'只露出右手递来一把钥匙',expression:null,gaze:null,contact:null}]};
+    f.state.relationOverrides={visible_characters:[{canonical_name:'林岚',presence_evidence:'林岚伸手',visible_scope:null},
+        {canonical_name:'周禾',presence_evidence:'周禾只露出右手递来一把钥匙',visible_scope:'右手，仅手部'}],
+        aliases:{小岚:'林岚',ZhouHe:'周禾'},action_ownership:['林岚伸手','周禾右手递来一把钥匙']};
+    f.state.refsByCharacter={'test.png':[{url:'/lin-identity.png',isPrimaryIdentity:true}],
+        'zhou.png':[{url:'/zhou-identity.png',isPrimaryIdentity:true}]};
+    f.state.editInstruction='Lin Lan reaches toward one key offered by Zhou He, whose right hand alone is visible.';
+    assert.equal((await f.run()).success,true);
+    assert.equal(f.state.textCalls,3);
+    assert.equal(f.state.editorCast.visible_characters[1].visible_scope,'右手，仅手部');
+    assert.deepEqual(f.state.editorCast.action_ownership,['林岚伸手','周禾右手递来一把钥匙']);
+    assert.deepEqual(f.state.imageCalls[0].refs.map(ref=>[ref.identityId,ref.identityName,ref.url]),
+        [['character:test.png','林岚','/lin-identity.png'],['character:zhou.png','周禾','/zhou-identity.png']]);
+    assert.match(f.state.imageCalls[0].prompt,/VISIBLE CAST \(2\): 林岚, 周禾/);
+});
+
+test('an empty third-stage result still stops before any image request',async()=>{
+    const f=fixture();f.state.editInstruction='';f.state.failImage=false;
+    const result=await f.run();
+    assert.equal(result.error.code,'ANALYSIS_INVALID_SCHEMA');
+    assert.equal(f.state.imageCalls.length,0);
+    assert.equal(f.message.extra.rpigLastAttempt.stage,'instruction');
+});
 
 test('image failure retries only images, preserving manual edits and skipping repeat review',async()=>{
     const f=fixture();assert.ok((await f.run()).error);assert.equal(f.state.textCalls,3);assert.equal(f.state.reviews,1);
