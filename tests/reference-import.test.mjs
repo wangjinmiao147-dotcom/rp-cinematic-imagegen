@@ -49,3 +49,14 @@ test('legacy design sheet labels retain their purpose when exported and imported
     assert.deepEqual(views.map(view=>view.viewType),['three_views','face_crop','full_body']);
     assert.equal(parseReferenceArchive(JSON.stringify({format:'rpig-references',version:1,views:[{label:'三视图',dataUrl}]}))[0].viewType,'three_views');
 });
+
+test('cropped annotation provenance survives device export without arbitrary embedded metadata', async () => {
+    const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
+    const annotation = { version: 1, sourceRefId: 'ref-original', sourceWidth: 200, sourceHeight: 100,
+        bounds: { x: 0.2, y: 0.1, width: 0.3, height: 0.8 } };
+    const archive = await exportReferenceArchive([{ dataUrl, annotation: { ...annotation, backendKey: 'private', originalUrl: '/private' } }]);
+    assert.deepEqual(parseReferenceArchive(archive)[0].annotation, annotation);
+    assert.ok(!archive.includes('private'));
+    const invalid = await exportReferenceArchive([{ dataUrl, annotation: { ...annotation, bounds: { x: 0.8, y: 0, width: 0.5, height: 1 } } }]);
+    assert.equal(parseReferenceArchive(invalid)[0].annotation, undefined);
+});

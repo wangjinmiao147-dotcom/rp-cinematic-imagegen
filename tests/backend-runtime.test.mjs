@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { generateComfyUIImage, generateGeminiImage, generateImage, hydrateReferenceImages } from '../src/backends.js';
 import { timeoutSignal } from '../src/utils.js';
+import { assembleUnifiedPrompt } from '../src/prompts.js';
 
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr1sAAAAASUVORK5CYII=';
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -12,6 +13,17 @@ const workflow = () => ({
     10: { class_type: 'LoadImage', inputs: { image: 'old-person.png' } },
 });
 const comfySettings = value => ({ backendUrl: 'http://comfy.test', comfyWorkflow: JSON.stringify(value || workflow()) });
+
+test('native Gemini sends aspect ratio in imageConfig, as the image API expects', async t => {
+    let body;
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        body=JSON.parse(options.body);
+        return json({candidates:[{content:{parts:[{inlineData:{mimeType:'image/png',data:'YWJj'}}]}}]});
+    });
+    await generateGeminiImage({backend:'gemini',backendUrl:'https://gemini.test/v1beta',backendModel:'gemini-3.1-flash-image'},'scene','16:9',[]);
+    assert.equal(body.generationConfig.imageConfig.aspectRatio,'16:9');
+    assert.equal(body.generationConfig.responseFormat,undefined);
+});
 function acceleratePolling(t, advance = () => {}) {
     t.mock.method(globalThis, 'setTimeout', callback => {
         advance();
@@ -238,3 +250,72 @@ test('editing the source while ComfyUI waits stops polling even without aborting
         { assertSourceValid: sourceGuard(state) }), { name: 'AbortError' });
     assert.deepEqual(calls, ['http://comfy.test/prompt']);
 });
+
+function bridgeFixture(t) {
+    const requests = [];
+    t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+        if (url.endsWith('/rpig-capabilities')) return json({ bridge: 'rpig-qwen', protocol: 2, reference_order: true, explicit_dimensions: true });
+        requests.push(JSON.parse(options.body));
+        return json({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'YWJj' } }] } }] });
+    });
+    const settings = { backend: 'gemini', backendUrl: 'http://127.0.0.1:8055/v1', backendModel: 'qwen-image',
+        stylePreset: 'reference', imageSize: '16:9', qwenResolution: '512x288', qwenReferencePolicy: 'story' };
+    return { settings, requests, images: () => requests[0].contents[0].parts.filter(part => part.inlineData) };
+}
+
+function distinctReference(index, name, kind = 'identity-primary') {
+    return { dataUrl: `data:image/png;base64,${Buffer.concat([Buffer.from(png.split(',')[1], 'base64'), Buffer.from([index])]).toString('base64')}`,
+        identityName: name, identityId: `character:${name}`, kind, role: kind, viewType: kind === 'identity-primary' ? 'primary' : 'full_body' };
+}
+
+test('an explicit reference plan bypasses the local Qwen second selection and preserves earlier omission diagnostics', async t => {
+    const f = bridgeFixture(t), selected = [distinctReference(1, 'A'), distinctReference(2, 'A', 'identity-supporting')];
+    const omitted = [{ identityName: 'A', label: 'unused costume', reason: 'selected by planner' }];
+    const diagnostics = { referenceSelection: { policy: 'cast-budget', supplied: 3, omitted } };
+    await generateImage(f.settings, 'Show A reading by the window.', '', selected,
+        { diagnostics, referencePlan: { refs: selected, omitted: [], maxReferences: 3 } });
+    assert.equal(f.images().length, 2);
+    assert.equal(f.images()[1].inlineData.data, selected[1].dataUrl.split(',')[1]);
+    assert.strictEqual(diagnostics.referenceSelection.omitted, omitted);
+    assert.equal(diagnostics.referenceSelection.policy, 'cast-budget');
+    assert.equal(diagnostics.referenceSelection.supplied, 3);
+    assert.equal(diagnostics.referenceSelection.sent, 2);
+});
+
+test('an invalid over-budget local reference plan stops before any network request', async t => {
+    let calls = 0;
+    t.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('unexpected request'); });
+    await assert.rejects(generateImage({ backend: 'gemini', backendUrl: 'http://127.0.0.1:8055', stylePreset: 'reference' },
+        'Show A beside B.', '', [distinctReference(1, 'A'), distinctReference(2, 'B')], { referencePlan: { maxReferences: 1 } }), { code: 'REFERENCE_LIMIT' });
+    assert.equal(calls, 0);
+});
+
+for (const maxReferences of [1, 2]) {
+    test(`mirror geometry honors a ${maxReferences}-slot reference plan without replacing the primary`, async t => {
+        const f = bridgeFixture(t), selected = [distinctReference(1, 'A')], warnings = [], diagnostics = {};
+        const prompt = assembleUnifiedPrompt({ editInstruction: 'Show A alone standing facing a vertical wall mirror. Observe her from behind and slightly to her left; her body and head remain directed toward the mirror. Her raised right palm touches the mirror at shoulder height and her left arm hangs at her side.' }) + '\nVISIBLE CAST (1): A.';
+        await generateImage(f.settings, prompt, '', selected, { diagnostics, onWarning: message => warnings.push(message),
+            referencePlan: { refs: selected, maxReferences } });
+        assert.equal(f.images().length, maxReferences);
+        assert.equal(f.images()[0].inlineData.data, selected[0].dataUrl.split(',')[1]);
+        assert.equal(diagnostics.references.some(ref => ref.role === 'mirror-layout'), maxReferences === 2);
+        assert.equal(warnings.length, maxReferences === 1 ? 1 : 0);
+        if (warnings.length) assert.match(warnings[0], /保留人物主身份图/);
+    });
+}
+
+for (const existing of [2, 3]) {
+    test(`pose geometry stays within the planned three slots with ${existing} selected references`, async t => {
+        const f = bridgeFixture(t), selected = [distinctReference(1, 'A'), distinctReference(2, 'B')], warnings = [], diagnostics = {};
+        if (existing === 3) selected.push(distinctReference(3, 'A', 'identity-supporting'));
+        const prompt = assembleUnifiedPrompt({ editInstruction: 'Show A leaning her back against a washbasin. Her hands rest near her abdomen. B bends the upper body forward and offers a towel with the right hand. Observe from a front three-quarter view.' }) + '\nVISIBLE CAST (2): A, B.';
+        await generateImage({ ...f.settings, qwenSceneDetail: true }, prompt, '', selected, { diagnostics,
+            resizeSceneImage: async data => data, onWarning: message => warnings.push(message), referencePlan: { refs: selected, maxReferences: 3 } });
+        assert.equal(f.images().length, 3);
+        assert.equal(f.images()[0].inlineData.data, selected[0].dataUrl.split(',')[1]);
+        assert.equal(f.images()[1].inlineData.data, selected[1].dataUrl.split(',')[1]);
+        assert.equal(diagnostics.references.some(ref => ref.role === 'scene-layout'), existing === 2);
+        if (existing === 3) assert.equal(f.images()[2].inlineData.data, selected[2].dataUrl.split(',')[1]);
+        assert.equal(warnings.length, existing === 3 ? 1 : 0);
+    });
+}

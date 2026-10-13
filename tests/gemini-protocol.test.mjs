@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {generateImage,extractChatImage} from '../src/backends.js';
+import {generateImage,generateGeminiImage,extractChatImage} from '../src/backends.js';
 import {upstreamErrorMessage} from '../src/utils.js';
 const refs=[{dataUrl:'data:image/png;base64,YWJj',kind:'identity-primary'},{dataUrl:'data:image/png;base64,ZGVm',kind:'continuity'}];
 const settings={backend:'openai',backendUrl:'https://relay.test/v1',backendModel:'gemini-3.1-flash-image',backendKey:'fixture',imageSize:'9:16'};
@@ -63,5 +63,37 @@ test('declared native Gemini protocol bypasses Images API',async t=>{
 test('Chat image extraction accepts typed images/markdown and rejects ordinary text links',()=>{
     for(const message of [{images:[{image_url:{url:'https://cdn.test/image.png'}}]}, {content:[{type:'image_url',image_url:{url:'https://cdn.test/image.png'}}]}, {content:'![image](https://cdn.test/image.png)'}])assert.equal(extractChatImage({choices:[{message}]}),'https://cdn.test/image.png');
     assert.equal(extractChatImage({choices:[{message:{content:'Please visit https://example.com for help'}}]}),null);
+});
+
+for(const [name,finalPart] of [
+    ['camel-case final image without a thought flag',{inlineData:{mimeType:'image/jpeg',data:'ZmluYWw='}}],
+    ['snake-case final image with an explicit false flag',{thought:false,inline_data:{mime_type:'image/jpeg',data:'ZmluYWw='}}],
+])test(`native Gemini skips thought images before the ${name}`,async t=>{
+    t.mock.method(globalThis,'fetch',async()=>json(200,{candidates:[{content:{parts:[
+        {thought:true,text:'Composing the scene'},
+        {thought:true,inlineData:{mimeType:'image/png',data:'ZHJhZnQ='}},
+        {thought:true,inline_data:{mime_type:'image/png',data:'c2Vjb25kLWRyYWZ0'}},
+        finalPart,
+    ]}}]}));
+    const result=await generateGeminiImage({...settings,backend:'gemini'},'Only two visible people','16:9',refs);
+    assert.equal(result.dataUrl,'data:image/jpeg;base64,ZmluYWw=');
+    assert.equal(result.usedRefs,true);
+});
+
+test('native Gemini never saves a thought-only image as a successful generation',async t=>{
+    let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;return json(200,{candidates:[{content:{parts:[
+        {thought:true,inlineData:{mimeType:'image/jpeg',data:'ZHJhZnQ='}},
+        {text:'No final image was generated'},
+    ]}}]});});
+    await assert.rejects(generateGeminiImage({...settings,backend:'gemini'},'test','16:9',refs),e=>e.code==='GEMINI_IMAGE_INCOMPLETE'&&/未返回最终图片/.test(e.message));
+    assert.equal(calls,1);
+});
+
+test('native Gemini reports public response text instead of thinking text when no image is returned',async t=>{
+    t.mock.method(globalThis,'fetch',async()=>json(200,{candidates:[{content:{parts:[
+        {thought:true,text:'Internal draft analysis'},
+        {text:'Cannot generate this scene'},
+    ]}}]}));
+    await assert.rejects(generateGeminiImage({...settings,backend:'gemini'},'test','16:9',[]),e=>/Cannot generate this scene/.test(e.message)&&!/Internal draft/.test(e.message));
 });
 

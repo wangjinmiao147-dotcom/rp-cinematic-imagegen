@@ -6,6 +6,26 @@ const object = x => x && typeof x === 'object' && !Array.isArray(x);
 const text = x => typeof x === 'string' ? x.trim() : '';
 const unknown = x => !text(x) || /^(?:null|none|unknown|n\/a|未知|未说明|未提及|不明)$/i.test(text(x));
 const list = x => x == null ? [] : Array.isArray(x) ? x : [x];
+
+export function expandQuotedEvidence(raw, source) {
+    if (typeof raw !== 'string' || typeof source !== 'string' || source.includes(raw)) return raw;
+    const parts = raw.split(/…+|\.{3,}/).map(part => part.trim());
+    if (parts.length < 2 || parts.length > 6 || parts.some(part => part.length < 4)) return raw;
+    let start = -1, end = 0;
+    for (const part of parts) {
+        const at = source.indexOf(part);
+        if (at < end || at < 0 || source.indexOf(part, at + 1) >= 0) return raw;
+        const before = source.slice(0, at);
+        const after = source.slice(at + part.length);
+        // Recover complete sentences/clauses, never a name or verb fragment
+        // that could skip a negation. Restore all omitted source text.
+        if (before.trim() && !/[。.!?！？;；\n]\s*$/.test(before)) return raw;
+        if (!/[。.!?！？;；]$/.test(part) && after.trim() && !/^\s*[。.!?！？;；\n]/.test(after)) return raw;
+        if (start < 0) start = at;
+        end = at + part.length;
+    }
+    return end - start <= 1200 ? source.slice(start, end) : raw;
+}
 const fields = {
     1: ['moment','moment_evidence','scene_state','actions','explicit_changes','thoughts','uncertainties',
         'narrative_end_state','persistent_continues','persistent_updates','continuity_state','continuity_updates','narrative_end_updates'],
@@ -127,6 +147,11 @@ export function normalizeAnalysisResult(raw, stage, options = {}) {
         });
     };
     if (stage === 1) {
+        const expanded = expandQuotedEvidence(value.moment_evidence, source);
+        if (expanded !== value.moment_evidence) {
+            value.moment_evidence = expanded;
+            note('moment_evidence', '从同一条最新正文补齐省略引文，保留所有中间原文');
+        }
         value.moment = describe(value.moment, 'moment') || '';
         value.actions = list(value.actions).map((a,i) => {
             if (!object(a)) { note(`actions.${i}`, '无有效人物的占位记录略过'); return null; }

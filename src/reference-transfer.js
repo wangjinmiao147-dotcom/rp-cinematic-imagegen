@@ -1,5 +1,6 @@
 import { hydrateReferenceImages } from './backends.js';
 import { blobToDataUrl, dataUrlToBlob, RpigError } from './utils.js';
+import { normalizeReferenceAnnotation } from './reference-plan.js';
 
 export const MAX_REFERENCE_ARCHIVE_BYTES = 30 * 1024 * 1024;
 
@@ -43,6 +44,7 @@ export async function exportReferenceArchive(refs, fetchImage) {
             isPrimaryIdentity: !!ref.isPrimaryIdentity,
             viewType: archiveViewType(ref),
             enabled: ref.enabled !== false,
+            ...(normalizeReferenceAnnotation(ref.annotation) ? { annotation: normalizeReferenceAnnotation(ref.annotation) } : {}),
         })) });
     if (new Blob([text]).size > MAX_REFERENCE_ARCHIVE_BYTES) throw new RpigError('REFERENCE_ARCHIVE_TOO_LARGE', '参考图包超过 30MB，请分批迁移');
     return text;
@@ -63,6 +65,7 @@ export function parseReferenceArchive(text) {
             isPrimaryIdentity: !!ref.isPrimaryIdentity,
             viewType: archiveViewType(ref),
             enabled: ref.enabled !== false,
+            ...(normalizeReferenceAnnotation(ref.annotation) ? { annotation: normalizeReferenceAnnotation(ref.annotation) } : {}),
         };
     });
 }

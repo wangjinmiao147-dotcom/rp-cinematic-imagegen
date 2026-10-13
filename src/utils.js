@@ -342,6 +342,7 @@ export function resolvePromptFormat(settings) {
     const s = settings || {};
     if (s.promptFormat === 'natural') return 'natural';
     if (s.promptFormat === 'tags') return 'tags';
+    if (s.backend === 'comfyui' && s.comfyPreset === 'qwen-edit') return 'natural';
     if (s.backend === 'sd' || s.backend === 'comfyui' || s.backend === 'tavern-sd') {
         return 'tags';
     }

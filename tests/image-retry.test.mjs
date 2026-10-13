@@ -12,6 +12,9 @@ import {sanitizeDiagnostics} from '../src/diagnostics.js';
 import {resolveCastReferencePlan} from '../src/character-identities.js';
 import * as visualConstraints from '../src/visual-constraints.js';
 import * as taskContext from '../src/task-context.js';
+import * as referencePlan from '../src/reference-plan.js';
+import { selectCharacterLoras } from '../src/character-lora.js';
+import { BACKENDS, getLocalRenderParameters } from '../src/backends.js';
 
 // Execute the actual task function with isolated host/API adapters. This checks
 // the production orchestration, including all three text stages and the review.
@@ -31,7 +34,8 @@ function fixture({ clock = null } = {}) {
         constructor(...args) { super(...(args.length ? args : [clock.now])); }
         static now() { return clock.now; }
     } : Date;
-    const dependencies={Date:RuntimeDate,getCurrentWorldAgeContext,loadWorldInfo:async()=>state.worldBook||null,...utils,...sceneState,...qwen,...visualConstraints,...taskContext,parseAnalysisResponse,sanitizeDiagnostics,resolveCastReferencePlan,rpigImageRetryCache:cache,imageRetrySignature,getContext:()=>context,getChatSessionKey:c=>c.chatId,getSettings:()=>settings,
+    const dependencies={Date:RuntimeDate,BACKENDS,getCurrentWorldAgeContext,loadWorldInfo:async()=>state.worldBook||null,...utils,...sceneState,...qwen,...visualConstraints,...taskContext,...referencePlan,selectCharacterLoras,parseAnalysisResponse,sanitizeDiagnostics,resolveCastReferencePlan,rpigImageRetryCache:cache,imageRetrySignature,getContext:()=>context,getChatSessionKey:c=>c.chatId,getSettings:()=>settings,
+        getLocalRenderParameters,
         getAllCharacters:()=> (state.characters || [character]).map(c=>({name:c.name,avatar:c.avatar,raw:c})),
         getCharacterForMessage:()=>character,getCurrentCharacter:()=>character,getPreviousGeneratedImage:()=>null, DEFAULT_SD_NEGATIVE: 'negative', timeoutSignal: () => new AbortController().signal, throwIfAborted: (signal) => { if (signal?.aborted) throw new DOMException('Aborted', 'AbortError'); }, scrubSensitiveText: (text) => text, extractJson: (text) => JSON.parse(text),
         setGenStatus:()=>{},toastr:Object.fromEntries(['info','warning','success','error'].map(type=>[type,(message,_title,options)=>state.toasts.push({type,message,options})])),
@@ -70,7 +74,7 @@ function fixture({ clock = null } = {}) {
         getCharacterRefs:async target=>{state.refReads++;state.onRefs?.();if(state.failRefs)throw new Error('reference read failed');return target==='user'?(state.userRefs||[]):(state.refsByCharacter?.[target?.avatar] || state.refs || []);},
         buildSceneAwareImagePrompt:({basePrompt})=>basePrompt+' + reference instructions',
         reviewFinalPrompt:async()=>{state.reviews++;state.onReview?.();return{confirmed:true,prompt:'User edited final prompt',avoid:'User edited negative'};},
-        generateImage:async(s,p,a,refs)=>{state.imageCalls.push({settings:{...s},prompt:p,avoid:a,refs});state.onImage?.();if(state.cancelImage)throw utils.createAbortError();if(state.failImage)throw new Error('image backend failed');return{dataUrl:'data:image/png;base64,YWJj',model:'image',usedRefs:true};},
+        generateImage:async(s,p,a,refs,options)=>{state.imageCalls.push({settings:{...s},prompt:p,avoid:a,refs,options});state.onImage?.();if(state.cancelImage)throw utils.createAbortError();if(state.failImage)throw new Error('image backend failed');return{dataUrl:'data:image/png;base64,YWJj',model:'image',usedRefs:true};},
         fetchToDataUrl:async()=>'',SlashCommandParser:{},persistMediaUrl:async()=>'/saved.png',saveBase64AsFile:()=>{},migrateLegacyMedia:()=>{},
         $:()=>({addClass(){return this;}}),updateMessageBlock:()=>{},ensureFallbackMediaRender:()=>{},saveToGallery:async()=>{},
     };
@@ -351,4 +355,88 @@ test('changing backend settings during text analysis applies to the next task on
     f.state.failImage=false;
     await f.run();
     assert.equal(f.state.imageCalls[1].settings.backendUrl,'https://replacement.test/v1');
+});
+
+test('text-only Comfy generation never reads identity libraries and passes the one visible role LoRA', async () => {
+    const f = fixture();
+    Object.assign(f.settings, { backend: 'comfyui', comfyPreset: 'sd-text', stylePreset: 'character', previewBeforeGeneration: false,
+        characterLoras: { 'character:test.png': { enabled: true, name: 'test.safetensors', family: 'sd', strengthModel: 0.8, strengthClip: 0.7, triggerWords: 'test-person' } } });
+    f.state.failRefs = true; f.state.failImage = false;
+    assert.equal((await f.run()).success, true);
+    assert.equal(f.state.refReads, 0); assert.equal(f.state.avatarReads || 0, 0);
+    const request = f.state.imageCalls[0];
+    assert.deepEqual(request.refs, []);
+    assert.equal(request.options.characterLoras[0].identityId, 'character:test.png');
+    assert.equal(request.options.referencePlan.maxReferences, 0);
+});
+
+test('text-only/reference-style conflicts stop before analysis or reference reads', async () => {
+    const f = fixture(); Object.assign(f.settings, { backend: 'comfyui', comfyPreset: 'sd-text', stylePreset: 'reference' });
+    await f.run();
+    assert.equal(f.message.extra.rpigLastAttempt.errorCode, 'COMFY_TEXT_REFERENCE_CONFLICT');
+    assert.equal(f.state.textCalls, 0); assert.equal(f.state.refReads, 0); assert.equal(f.state.imageCalls.length, 0);
+});
+
+test('Qwen group scene sends every actor primary before auxiliary crops and skips frame-wide character LoRA', async () => {
+    const f = fixture();
+    Object.assign(f.settings, { backend: 'comfyui', comfyPreset: 'qwen-edit', stylePreset: 'reference', previewBeforeGeneration: false,
+        characterLoras: { 'character:test.png': { enabled: true, name: 'test.safetensors', family: 'qwen', strengthModel: 0.8, strengthClip: 0.8, triggerWords: '' } } });
+    f.state.characters = [f.character, { name: 'B', avatar: 'b.png' }, { name: 'C', avatar: 'c.png' }];
+    f.state.visibleCharacters = ['Test', 'B', 'C']; f.state.failImage = false;
+    f.state.refsByCharacter = {
+        'test.png': [{ url: '/test.png', isPrimaryIdentity: true }, { url: '/test-crop.png', viewType: 'face_crop' }],
+        'b.png': [{ url: '/b.png', isPrimaryIdentity: true }], 'c.png': [{ url: '/c.png', isPrimaryIdentity: true }],
+    };
+    assert.equal((await f.run()).success, true);
+    const request = f.state.imageCalls[0];
+    assert.deepEqual(request.refs.map(ref => ref.identityId), ['character:test.png', 'character:b.png', 'character:c.png']);
+    assert.deepEqual(request.options.characterLoras, []);
+    assert.equal(request.options.referencePlan.omitted.length, 1);
+    assert.ok(f.state.toasts.some(toast => /多位人物/.test(toast.message)));
+});
+
+test('four confirmed actors exceed the native Qwen budget without submitting a truncated scene', async () => {
+    const f = fixture(); Object.assign(f.settings, { backend: 'comfyui', comfyPreset: 'qwen-edit', stylePreset: 'reference' });
+    f.state.characters = [f.character, ...['B', 'C', 'D'].map(name => ({ name, avatar: name + '.png' }))];
+    f.state.visibleCharacters = ['Test', 'B', 'C', 'D'];
+    f.state.refsByCharacter = Object.fromEntries(f.state.characters.map(card => [card.avatar, [{ url: '/' + card.avatar, isPrimaryIdentity: true }]]));
+    await f.run();
+    assert.equal(f.message.extra.rpigLastAttempt.errorCode, 'REFERENCE_BUDGET_EXCEEDED');
+    assert.equal(f.state.imageCalls.length, 0);
+});
+
+test('reference capacity changes invalidate stage-two decisions while endpoint repairs reuse them', async () => {
+    const f = fixture(); Object.assign(f.settings, { backend: 'gemini', backendUrl: 'http://localhost:8055', qwenReferenceLimit: 3 });
+    await f.run(); assert.equal(f.state.textCalls, 3);
+    f.settings.backendUrl = 'http://127.0.0.1:8055';
+    await f.run(); assert.equal(f.state.textCalls, 3);
+    f.settings.qwenReferenceLimit = 1;
+    await f.run(); assert.equal(f.state.textCalls, 6);
+});
+
+test('an AI-inferred story character can use a unique titled card without being renamed to that title', async () => {
+    const f = fixture(); Object.assign(f.character, { name: '北城故事合集', cardTitle: '北城故事合集', hasExplicitIdentity: false });
+    f.message.name = f.character.name; f.message.mes = '林岚在门边等候。';
+    f.settings.stylePreset = 'reference'; f.settings.previewBeforeGeneration = false; f.state.failImage = false;
+    f.state.visibleCharacters = ['林岚'];
+    f.state.factOverrides = { actions: [{ character: '林岚', action: '在门边等候', expression: null, gaze: null, contact: null }] };
+    f.state.relationOverrides = { visible_characters: [{ canonical_name: '林岚', presence_evidence: f.message.mes, visible_scope: null }],
+        aliases: { 北城故事合集: '林岚' } };
+    f.state.refs = [{ url: '/lin.png', isPrimaryIdentity: true }];
+    assert.equal((await f.run()).success, true);
+    assert.equal(f.state.imageCalls[0].refs[0].identityName, '林岚');
+    assert.equal(f.state.imageCalls[0].refs[0].identityId, 'character:test.png');
+    assert.match(f.state.imageCalls[0].prompt, /VISIBLE CAST \(1\): 林岚/);
+    assert.doesNotMatch(f.state.imageCalls[0].prompt, /VISIBLE CAST \(1\): 北城故事合集/);
+});
+
+test('a missing focal identity cannot be silently replaced by the other actor single reference', async () => {
+    const f = fixture(); Object.assign(f.settings, { backend: 'comfyui', comfyPreset: 'sd-img2img', stylePreset: 'reference' });
+    f.state.characters = [f.character, { name: 'B', avatar: 'b.png' }];
+    f.state.visibleCharacters = ['Test', 'B'];
+    f.state.refsByCharacter = { 'test.png': [], 'b.png': [{ url: '/b.png', isPrimaryIdentity: true }] };
+    f.state.failImage = false;
+    await f.run();
+    assert.equal(f.message.extra.rpigLastAttempt.errorCode, 'CAST_REFERENCE_REQUIRED');
+    assert.equal(f.state.imageCalls.length, 0);
 });

@@ -3,6 +3,8 @@ import { isLocalQwen, qwenSteps, qwenSize, qwenReferenceEditPrompt, qwenIdentity
 import { mirrorLayoutPlan, mirrorLayoutReference } from './mirror-layout.js';
 import { resizeSceneOutput } from './scene-output.js';
 import { supportedPosePlan, supportedPoseReference } from './pose-layout.js';
+import { getComfyPreset, readComfyCapabilities, inspectComfyCapabilities, buildComfyPresetWorkflow, comfyRenderParameters } from './comfy-presets.js';
+import { configuredLocalImageSize } from './render-size.js';
 // ============================================================
 // RP 电影配图 - 图片后端模块
 // ============================================================
@@ -22,7 +24,7 @@ import {
     requestFailure,
     upstreamErrorMessage,
 } from './utils.js';
-import { DEFAULT_SD_NEGATIVE, preparePromptForBackend, referenceImageEditPrompt } from './prompts.js';
+import { DEFAULT_SD_NEGATIVE, preparePromptForBackend, referenceImageEditPrompt, isClipDiffusionBackend } from './prompts.js';
 
 export const BACKENDS = {
     OPENAI: 'openai',      // OpenAI 兼容 images API（gpt-image / 国产兼容）
@@ -39,6 +41,28 @@ export const SIZE_MAP = {
     '1:1':    { openai: '1024x1024', gemini: '1:1',   sd: [1024, 1024] },
     '9:16':   { openai: '1024x1536', gemini: '9:16',  sd: [768, 1344] },
 };
+
+export function getLocalRenderParameters(settings = {}, refs = [], prompt = '') {
+    let parameters;
+    if (isLocalQwen(settings)) {
+        const scene = settings.stylePreset === 'reference' ? qwenSceneRenderPlan(settings, refs, settings.imageSize || '16:9', prompt) : null;
+        const renderSettings = scene ? settings : qwenIdentityRenderSettings(settings, refs);
+        const size = scene?.renderSize || qwenSize(renderSettings, settings.imageSize || '16:9');
+        parameters = { kind: 'qwen', size, outputSize: scene?.outputSize || size, steps: qwenSteps(renderSettings.qwenSteps) };
+    } else if (settings.backend === BACKENDS.COMFYUI) {
+        const render = comfyRenderParameters(settings);
+        if (!render) return { kind: 'workflow', description: '尺寸与步数：使用自定义工作流中的设置' };
+        parameters = { kind: 'comfyui', ...render, outputSize: render.size };
+    } else if (settings.backend === BACKENDS.SD) {
+        const size = configuredLocalImageSize(settings) || (SIZE_MAP[settings.imageSize] || SIZE_MAP['16:9']).sd;
+        parameters = { kind: 'sd', size, outputSize: size, steps: parseInt(settings.sdSteps, 10) || 28 };
+    } else return null;
+    parameters.description = `实际绘制：${parameters.size.join('×')} 像素 · ${parameters.steps} 步`;
+    if (parameters.outputSize.some((value, index) => value !== parameters.size[index])) {
+        parameters.description += ` · 最终输出：${parameters.outputSize.join('×')} 像素`;
+    }
+    return parameters;
+}
 
 // Only the dedicated region-edit entry point can override the ordinary Qwen
 // story size. This is a request-local value, never a saved resolution preset.
@@ -59,6 +83,13 @@ function isGeminiImageModel(model) { return /(?:^|\/)gemini-[\w.-]*image[\w.-]*$
 function ensureGenerationSource(options = {}) {
     throwIfAborted(options.signal);
     options.assertSourceValid?.();
+}
+
+function assertComfyReferenceCount(preset, refs) {
+    if (refs != null && !Array.isArray(refs)) throw new RpigError('REFERENCE_INVALID', 'ComfyUI 参考图列表格式无效，已停止');
+    const count = Array.isArray(refs) ? refs.length : 0;
+    if (count < preset.minRefs || count > preset.maxRefs) throw new RpigError('COMFY_REFERENCE_LIMIT',
+        `「${preset.label}」需要 ${preset.minRefs}–${preset.maxRefs} 张参考图，当前 ${count} 张；已停止，未丢弃参考图`);
 }
 
 async function declaredGeminiProtocol(settings, options) {
@@ -250,42 +281,70 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
     const fetchFn = options.fetchToDataUrl || fetchToDataUrl;
 
     ensureGenerationSource(options);
+    const comfyPreset = s.backend === BACKENDS.COMFYUI ? getComfyPreset(s) : null;
+    const localQwen = !comfyPreset && isLocalQwen(s);
+    const renderParameters = getLocalRenderParameters(s, refs, prompt);
+    if (options.diagnostics && renderParameters) options.diagnostics.renderParameters = renderParameters;
+    if (comfyPreset && comfyPreset.id !== 'custom') assertComfyReferenceCount(comfyPreset, refs);
+    if (comfyPreset?.id === 'custom' && options.characterLoras?.length) {
+        throw new RpigError('COMFY_LORA_UNSUPPORTED', '自定义工作流不能自动绑定角色 LoRA，请使用预置或自行配置工作流');
+    }
     if (s.stylePreset === 'reference') {
         if (!refs?.length || refs.every(ref => ref.kind === 'continuity')) {
             throw new RpigError('IDENTITY_REFERENCE_REQUIRED', '参考图驱动需要该入镜人物的身份参考图；未找到原图，已停止以避免重新设计人物');
         }
-        if (![BACKENDS.OPENAI, BACKENDS.GEMINI, BACKENDS.SD].includes(s.backend || BACKENDS.OPENAI)) throw new RpigError('REFERENCE_BACKEND_UNSUPPORTED', '参考图驱动模式请使用 OpenAI 兼容图片接口、Gemini 或 SD img2img；当前后端未验证图片编辑能力，已停止。');
+        if (![BACKENDS.OPENAI, BACKENDS.GEMINI, BACKENDS.SD].includes(s.backend || BACKENDS.OPENAI) && !comfyPreset?.supportsReference) throw new RpigError('REFERENCE_BACKEND_UNSUPPORTED', '当前后端或工作流不支持参考图驱动，请选择图片编辑接口或支持图生图的 ComfyUI 预置；已停止。');
     }
-    const selectedRefs = isLocalQwen(s) ? selectQwenStoryReferences(refs, s) : refs;
-    if (options.diagnostics && isLocalQwen(s)) options.diagnostics.referenceSelection = {
-        policy:s.qwenReferencePolicy || 'story', supplied:refs?.length || 0, sent:selectedRefs?.length || 0,
-        omitted:(refs || []).filter(r => !selectedRefs.includes(r)).map(r => ({identityName:r.identityName, label:r.label, reason:'supporting costume view omitted from story request'})),
-    };
+    const referencePlan = options.referencePlan;
+    const selectedRefs = localQwen && !referencePlan ? selectQwenStoryReferences(refs, s) : refs;
+    const referenceLimit = referencePlan?.maxReferences;
+    const maxPlannedReferences = Number.isInteger(referenceLimit) && referenceLimit >= 0 ? referenceLimit : Infinity;
+    if (referencePlan && (selectedRefs?.length || 0) > maxPlannedReferences) {
+        throw new RpigError('REFERENCE_LIMIT', '选定参考图超过本次后端容量，已停止，未丢弃人物主图');
+    }
+    if (options.diagnostics && localQwen) {
+        const selection = options.diagnostics.referenceSelection ||= {};
+        selection.policy ||= referencePlan ? 'planned' : s.qwenReferencePolicy || 'story';
+        selection.supplied ??= referencePlan ? (refs?.length || 0) + (referencePlan.omitted?.length || 0) : refs?.length || 0;
+        selection.omitted ??= referencePlan
+            ? (referencePlan.omitted || []).map(({ ref, reason }) => ({ identityName: ref?.identityName, label: ref?.label, reason }))
+            : (refs || []).filter(r => !selectedRefs.includes(r)).map(r => ({identityName:r.identityName, label:r.label, reason:'supporting costume view omitted from story request'}));
+        selection.sent = selectedRefs?.length || 0;
+    }
     const hydratedRefs = await hydrateReferenceImages(selectedRefs, fetchFn, selectedRefs?.length || 0, options.signal, options.diagnostics, onWarning);
     ensureGenerationSource(options);
+    if (options.diagnostics?.referenceSelection) options.diagnostics.referenceSelection.sent = hydratedRefs.length;
     if (s.stylePreset === 'reference' && !hydratedRefs.some(ref => (ref.role || ref.kind) === 'identity-primary')) {
         throw new RpigError('IDENTITY_REFERENCE_REQUIRED', '身份主图未成功读取，已停止生图');
     }
-    if (!isLocalQwen(s) && hydratedRefs.length > 1 && [BACKENDS.SD, BACKENDS.COMFYUI, BACKENDS.TAVERN_SD].includes(s.backend)) {
+    if (!localQwen && hydratedRefs.length > 1 && ([BACKENDS.SD, BACKENDS.TAVERN_SD].includes(s.backend)
+        || comfyPreset?.id === 'custom')) {
         throw new RpigError('MULTI_REFERENCE_UNSUPPORTED', '当前后端尚未实现同时使用多张参考图，已停止，未只取第一张。请使用支持多图的 OpenAI 兼容图片接口或 Gemini，或自行保留一张参考图。');
     }
-    const prepared = preparePromptForBackend(s, prompt, avoid, options);
-    const sceneRenderPlan = isLocalQwen(s) && s.stylePreset === 'reference' ? qwenSceneRenderPlan(s,hydratedRefs,s.imageSize || '16:9',prepared.prompt) : null;
+    // Native Qwen edits use natural-language preparation; this local override
+    // does not change the selected ComfyUI transport or its model settings.
+    const preparationSettings = comfyPreset?.modelFamily === 'qwen' ? { ...s, backend: BACKENDS.GEMINI } : s;
+    const prepared = preparePromptForBackend(preparationSettings, prompt, avoid, options);
+    const sceneRenderPlan = localQwen && s.stylePreset === 'reference' ? qwenSceneRenderPlan(s,hydratedRefs,s.imageSize || '16:9',prepared.prompt) : null;
     const supportedPose = sceneRenderPlan ? supportedPosePlan(prepared.prompt,hydratedRefs,s) : null;
-    if(supportedPose){
+    if (supportedPose && hydratedRefs.length >= maxPlannedReferences) {
+        onWarning('参考图槽位已满，保留人物主身份图，本次不添加可选的姿态几何辅助图');
+    } else if(supportedPose){
         const layout=supportedPoseReference(supportedPose,...sceneRenderPlan.renderSize);
         layout.referenceIndex=hydratedRefs.length+1;layout.hash=await computeDataUrlHash(layout.dataUrl);hydratedRefs.push(layout);
         if(options.diagnostics){
             options.diagnostics.poseGeometry={kind:supportedPose.kind,identityNames:supportedPose.identityNames,hand:supportedPose.hand,
                 referenceIndex:layout.referenceIndex,projectedPeople:layout.projectedPeople};
             options.diagnostics.referenceCount=hydratedRefs.length;options.diagnostics.referenceSelection.sent=hydratedRefs.length;
-            options.diagnostics.referenceSelection.generated=1;
+            options.diagnostics.referenceSelection.generated = (options.diagnostics.referenceSelection.generated || 0) + 1;
             options.diagnostics.references.push({referenceIndex:layout.referenceIndex,role:layout.role,source:layout.source,label:layout.label,hash:layout.hash});
         }
     }
-    if (isLocalQwen(s) && s.stylePreset === 'reference') {
+    if (localQwen && s.stylePreset === 'reference') {
         const plan = mirrorLayoutPlan(prepared.prompt, hydratedRefs, s);
-        if (plan) {
+        if (plan && hydratedRefs.length >= maxPlannedReferences) {
+            onWarning('参考图槽位已满，保留人物主身份图，本次不添加可选的镜面几何辅助图');
+        } else if (plan) {
             const [width,height] = sceneRenderPlan?.renderSize || qwenSize(s);
             const layout = mirrorLayoutReference(plan,width,height);
             layout.referenceIndex = hydratedRefs.length + 1;
@@ -296,18 +355,18 @@ export async function generateImage(settings, prompt, avoid, refs, options = {})
                     referenceIndex:hydratedRefs.length,geometryContact:layout.geometryContact,reflectedContact:layout.reflectedContact};
                 options.diagnostics.referenceCount = hydratedRefs.length;
                 options.diagnostics.referenceSelection.sent = hydratedRefs.length;
-                options.diagnostics.referenceSelection.generated = 1;
+                options.diagnostics.referenceSelection.generated = (options.diagnostics.referenceSelection.generated || 0) + 1;
                 options.diagnostics.references.push({referenceIndex:layout.referenceIndex,role:layout.role,
                     source:layout.source,label:layout.label,hash:layout.hash,dataLength:layout.dataUrl.length});
             }
         }
     }
-    if (s.stylePreset === 'reference') prepared.prompt = isLocalQwen(s)
+    if (s.stylePreset === 'reference' && !isClipDiffusionBackend(s)) prepared.prompt = localQwen
         ? qwenReferenceEditPrompt(prepared.prompt, hydratedRefs, {compactScene:s.qwenSceneDetail === true})
         : referenceImageEditPrompt(prepared.prompt, hydratedRefs);
 
     let result;
-    if (isLocalQwen(s)) {
+    if (localQwen) {
         result = await generateGeminiImage(s, prepared.prompt, size.gemini, hydratedRefs, {
             ...options, negativePrompt: options.negativePrompt ?? prepared.avoid,
             [LOCAL_SCENE_RENDER_PLAN]:sceneRenderPlan,
@@ -550,6 +609,36 @@ export async function generateOpenAIImage(settings, prompt, size, refs, options 
 /**
  * Google Gemini 图像生成后端（符合当前官方 Generate Content REST 规范）
  */
+function geminiReferenceInstruction(ref) {
+    const subject = ref.identityName ? ` for ${ref.identityName}` : '';
+    const role = ref.role || ref.kind;
+    if (role === 'identity-primary') {
+        return `This is the immutable PRIMARY IDENTITY reference${subject}. Preserve this person's face, natural skin palette, hair color, body build and head-to-body proportions under the new scene lighting. Transfer this design into the requested pose and hand tasks: the pictured pose, hand tasks, held props and background are not current story evidence. Unless the current story establishes a wardrobe change, retain this person's compatible outfit silhouette, length, layers, cut and established ornament details; a generic garment description does not authorize redesign. Apply these details only to this named person.`;
+    }
+    if (role === 'continuity') {
+        return 'This is a CONTINUITY reference only for story-confirmed unchanged clothing and props of matching visible people. Never use it to redefine faces, skin color, body build, cast, actions, setting or lighting.';
+    }
+    return `This is a supporting reference${subject} for the SAME person. Supply compatible visible design details without overriding that person's primary identity or adding a person.`;
+}
+
+function geminiCloudStoryPrompt(prompt, refs) {
+    const mapped = referenceImageEditPrompt(prompt, refs);
+    const changes = mapped.indexOf('REQUESTED CHANGES:');
+    const preserve = mapped.indexOf('DETAILS TO PRESERVE:', changes);
+    // Only reorder the recognized story template. User-written instructions and
+    // local bridge prompts must keep their own structure and exact content.
+    if (!prompt.startsWith('Edit the supplied references') || changes < 0 || preserve < changes) return mapped;
+    const ends = [mapped.indexOf('VISIBLE CAST', preserve), mapped.indexOf('REFERENCE MAPPING:', preserve)]
+        .filter(index => index > preserve);
+    const end = ends.length ? Math.min(...ends) : mapped.length;
+    const scene = mapped.slice(changes, end).trim();
+    const castAndMapping = mapped.slice(end).trim();
+    const rules = mapped.slice(0, changes).trim();
+    // Put the actual action before the long rendering rules once, preserving all
+    // source wording, current state, exclusions, cast and reference mappings.
+    return `MAIN SCENE TO DRAW NOW:\n${scene}\n\n${castAndMapping}\n\nREFERENCE INTERPRETATION AND RENDERING RULES:\n${rules}`;
+}
+
 export async function generateGeminiImage(settings, prompt, aspectRatio, refs, options = {}) {
     ensureGenerationSource(options);
     let base = normalizeBackendUrl(settings.backendUrl, 'https://generativelanguage.googleapis.com/v1');
@@ -571,8 +660,9 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
                     const mime = ref.dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/)?.[1] || 'image/png';
                     const base64Data = ref.dataUrl.split(',')[1];
                     if (base64Data) {
-                        // Roles are already in REFERENCE MAPPING. The bridge sees
-                        // one editing instruction, not a second parallel template.
+                        // Cloud editing needs each identity label beside its image.
+                        // The local bridge keeps its single ordered instruction.
+                        if (!isLocalQwen(settings)) parts.push({ text: `Reference image ${index + 1}: ${geminiReferenceInstruction(ref)} This reference cannot add anyone beyond the locked visible cast.` });
                         parts.push({
                             inlineData: {
                                 mimeType: mime,
@@ -584,7 +674,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
             }
         }
         // 插件统一模板，附带精简编号映射，明确图 1 承担指定画风参考
-        const promptWithMap = isLocalQwen(settings) ? prompt : referenceImageEditPrompt(prompt, refs);
+        const promptWithMap = isLocalQwen(settings) ? prompt : geminiCloudStoryPrompt(prompt, refs);
         parts.push({ text: promptWithMap });
     } else {
     const identityNames = [...new Set((refs || []).filter(ref => ref?.kind !== 'continuity' && ref?.identityName).map(ref => String(ref.identityName).trim()).filter(Boolean))];
@@ -596,12 +686,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
                 const mime = ref.dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/)?.[1] || 'image/png';
                 const base64Data = ref.dataUrl.split(',')[1];
                 if (base64Data) {
-                    const subject = ref.identityName ? ` for ${ref.identityName}` : '';
-                    const roleInstruction = ref.kind === 'identity-primary'
-                        ? `This is the immutable PRIMARY IDENTITY reference${subject}. Reproduce the exact same person and face: preserve face silhouette, facial proportions, eye shape and spacing, iris color, nose, mouth, age, skin tone, hairline, hairstyle, and signature ornaments. Do not redesign, beautify, merge, average, or reinterpret this identity.`
-                        : ref.kind === 'continuity'
-                            ? 'This is a CONTINUITY reference only. Use it for unchanged clothing, accessories, hairstyle state, and carried props. The primary identity reference overrides this image for every facial feature; ignore any facial drift already present here. Do not copy its pose, framing, background, or lighting.'
-                            : `This is an identity reference${subject}. Other references with the same identity name show this same person. References with a different identity name show a different cast member. Preserve this person's face and never merge, average, duplicate, or swap identities.`;
+                    const roleInstruction = geminiReferenceInstruction(ref);
                     parts.push({
                         text: `Reference image ${index + 1} (${ref.label || 'character reference'}): ${roleInstruction} It must not increase or duplicate the cast beyond the named people in the main instruction.`,
                     });
@@ -654,7 +739,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
         contents: [{ role: 'user', parts: parts }],
         generationConfig: {
             responseModalities: ["TEXT", "IMAGE"],
-            ...(options.openAICompatibleRelay ? { imageConfig: { aspectRatio: aspectRatio || '16:9' } } : { responseFormat: {
+            ...(!isLocalBridge ? { imageConfig: { aspectRatio: aspectRatio || '16:9' } } : { responseFormat: {
                 image: {
                     aspectRatio: aspectRatio || '16:9',
                 },
@@ -731,10 +816,15 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
     const data = await res.json();
     if (options.diagnostics && data.rpig) options.diagnostics.engine = data.rpig;
     const candidateParts = data?.candidates?.[0]?.content?.parts || [];
-    const imagePart = candidateParts.find(p => p.inlineData || p.inline_data);
+    // Thinking models may return interim images before the final image.
+    // Only a non-thought image may be saved as the completed story frame.
+    const imagePart = candidateParts.find(p => p.thought !== true && (p.inlineData || p.inline_data));
 
     if (!imagePart) {
-        const textPart = candidateParts.find(p => p.text);
+        if (candidateParts.some(p => p.thought === true && (p.inlineData || p.inline_data))) {
+            throw new RpigError(isLocalBridge ? 'QWEN_IMAGE_INCOMPLETE' : 'GEMINI_IMAGE_INCOMPLETE', `${backendLabel} 仅返回思考草图，未返回最终图片`);
+        }
+        const textPart = candidateParts.find(p => p.thought !== true && p.text);
         if (textPart && textPart.text) {
             throw new Error(`${backendLabel} 未生成图片，返回文本：${textPart.text.slice(0, 150)}`);
         }
@@ -755,7 +845,7 @@ export async function generateGeminiImage(settings, prompt, aspectRatio, refs, o
 export async function generateSDImage(settings, prompt, avoid, sdSize, refs, options = {}) {
     ensureGenerationSource(options);
     const base = normalizeBackendUrl(settings.backendUrl);
-    const [width, height] = sdSize || [1344, 768];
+    const [width, height] = configuredLocalImageSize(settings) || sdSize || [1344, 768];
     const negative = avoid || settings.sdNegative || DEFAULT_SD_NEGATIVE;
     const denoising = options.denoisingStrength !== undefined ? options.denoisingStrength : 0.55;
 
@@ -807,11 +897,73 @@ export async function generateSDImage(settings, prompt, avoid, sdSize, refs, opt
     };
 }
 
+async function generateComfyPresetImage(settings, prompt, avoid, refs, options, preset) {
+    assertComfyReferenceCount(preset, refs);
+    if (preset.id === 'sd-cast') {
+        const owners = new Set();
+        for (const ref of refs || []) {
+            const owner = ref.identityId || ref.identityName;
+            if (!owner || owners.has(owner) || (ref.role || ref.kind) !== 'identity-primary') {
+                throw new RpigError('COMFY_CAST_REFERENCE_INVALID', '多人参考排布只接受每位独立人物的一张主图，不能把同一人物的辅助视图排成额外人物。');
+            }
+            owners.add(owner);
+        }
+    }
+    if ((refs || []).some(ref => !ref?.dataUrl)) throw new RpigError('REFERENCE_MISSING', 'ComfyUI 参考图尚未读取，已停止');
+    const loras = options.characterLoras ?? [];
+    const referencePrompts = (refs || []).map(ref => typeof ref.identityDescription === 'string'
+        ? ref.identityDescription.slice(0, 1200) : typeof ref.identityName === 'string' ? ref.identityName : '');
+    if (!Array.isArray(loras) || loras.length > 1) throw new RpigError('COMFY_LORA_LIMIT', '当前预置只支持一个明确选中的角色 LoRA，已停止，未截断配置');
+    if (options.diagnostics) Object.assign(options.diagnostics, { preset: preset.id, loraCount: loras.length });
+    ensureGenerationSource(options);
+    const info = await readComfyCapabilities(settings, { signal: options.signal });
+    ensureGenerationSource(options);
+    const capability = inspectComfyCapabilities(info, settings, { loras });
+    if (!capability.ready) throw new RpigError('COMFY_PRESET_UNAVAILABLE',
+        `ComfyUI 预置未就绪：${[...capability.missingNodes, ...capability.missingModels].join('；')}。请安装所需节点或选择已有的正确模型`);
+    // Validate controls and graph bindings before any reference upload. These
+    // temporary names are never submitted; every slot is replaced after upload.
+    buildComfyPresetWorkflow(settings, { prompt, avoid, loras, referencePrompts,
+        uploadedImages: (refs || []).map((_, index) => `pending-${index + 1}.png`) });
+    const base = normalizeBackendUrl(settings.backendUrl);
+    const uploadedImages = [];
+    const uploadId = String(options.requestId || `rpig_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`)
+        .replace(/[^a-z0-9_-]/gi, '_').slice(0, 100);
+    for (const [index, ref] of (refs || []).entries()) {
+        ensureGenerationSource(options);
+        let uploaded;
+        try {
+            const form = new FormData();
+            form.append('image', dataUrlToBlob(ref.dataUrl), `${uploadId}_ref_${index + 1}.png`);
+            form.append('overwrite', 'false');
+            form.append('type', 'input');
+            const response = await fetch(`${base}/upload/image`, { method: 'POST', body: form,
+                signal: combineAbortSignals(options.signal, timeoutSignal(30000)) });
+            if (!response.ok) throw new RpigError('COMFY_REFERENCE_UPLOAD_HTTP',
+                `参考图 ${index + 1} 上传 HTTP ${response.status}: ${upstreamErrorMessage(await response.text(), [settings.backendKey])}`, { status: response.status });
+            uploaded = await response.json();
+            ensureGenerationSource(options);
+            if (typeof uploaded?.name !== 'string' || !uploaded.name.trim()
+                || (uploaded.subfolder != null && typeof uploaded.subfolder !== 'string')
+                || (uploaded.type != null && uploaded.type !== 'input')) {
+                throw new RpigError('COMFY_REFERENCE_UPLOAD_EMPTY', '参考图上传未返回有效输入文件名，已停止');
+            }
+        } catch (error) { throw requestFailure(error, `${base}/upload/image`, 'ComfyUI 参考图上传失败，已停止', [settings.backendKey]); }
+        uploadedImages.push(uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name);
+    }
+    ensureGenerationSource(options);
+    const { workflow, outputNodeId } = buildComfyPresetWorkflow(settings, { prompt, avoid, uploadedImages, loras, referencePrompts });
+    return submitComfyWorkflow(settings, workflow, options, { outputNodeId, usedRefs: uploadedImages.length > 0 });
+}
+
 /**
- * ComfyUI 后端（严格节点解析与防多节点覆盖）
+ * ComfyUI 后端（预置固定绑定，或旧自定义工作流严格解析）
  */
 export async function generateComfyUIImage(settings, prompt, avoid, refs, options = {}) {
     ensureGenerationSource(options);
+    const preset = getComfyPreset(settings);
+    if (preset.id !== 'custom') return generateComfyPresetImage(settings, prompt, avoid, refs, options, preset);
+    if (options.characterLoras?.length) throw new RpigError('COMFY_LORA_UNSUPPORTED', '自定义工作流不能自动绑定角色 LoRA，请使用预置或自行配置工作流');
     const base = normalizeBackendUrl(settings.backendUrl);
     const workflowRaw = (settings.comfyWorkflow || '').trim();
     if (!workflowRaw) {
@@ -954,7 +1106,12 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
         appliedReference = true;
     }
 
-    // 3. 提交任务
+    return submitComfyWorkflow(settings, workflow, options, { usedRefs: appliedReference });
+}
+
+async function submitComfyWorkflow(settings, workflow, options, { outputNodeId = null, usedRefs = false } = {}) {
+    const base = normalizeBackendUrl(settings.backendUrl);
+    // Submit only after every declared reference slot has been filled.
     ensureGenerationSource(options);
     const res = await fetch(`${base}/prompt`, {
         method: 'POST',
@@ -1000,15 +1157,17 @@ export async function generateComfyUIImage(settings, prompt, avoid, refs, option
         }
         if (!entry || !entry.outputs) continue;
 
-        for (const nodeId in entry.outputs) {
+        for (const nodeId of outputNodeId ? [outputNodeId] : Object.keys(entry.outputs)) {
             const out = entry.outputs[nodeId];
-            if (out.images && out.images.length) {
+            if (out?.images && out.images.length) {
                 const img = out.images[0];
                 const imgUrl = `${base}/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder || '')}&type=${encodeURIComponent(img.type || 'output')}`;
+                const dataUrl = await fetchToDataUrl(imgUrl, { signal: options.signal });
+                ensureGenerationSource(options);
                 return {
-                    dataUrl: await fetchToDataUrl(imgUrl, { signal: options.signal }),
+                    dataUrl,
                     model: 'ComfyUI',
-                    usedRefs: appliedReference,
+                    usedRefs,
                 };
             }
         }

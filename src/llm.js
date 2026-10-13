@@ -11,6 +11,7 @@ import {
     throwIfAborted,
     timeoutSignal,
     requestFailure,
+    RpigError,
 } from './utils.js';
 
 export function extractChatCompletionText(data) {
@@ -119,6 +120,8 @@ async function callLLMOnce(system, user, settings, getContextFn, options = {}) {
 
     if (!res.ok) {
         const errText = await res.text().catch(() => '');
+        if (res.status === 429) throw new RpigError('LLM_RATE_LIMITED',
+            `LLM HTTP 429: 当前分析接口返回额度或限流限制，可等待后重试或选择其他可用分析模型。${scrubSensitiveText(errText, [key]).slice(0, 300)}`, {status:429});
         throw new Error(`LLM HTTP ${res.status}: ${scrubSensitiveText(errText, [key]).slice(0, 300)}`);
     }
 

@@ -8,8 +8,18 @@ import { sanitizeDiagnostics, persistGenerationDiagnostics } from './src/diagnos
 import { downloadDiagnosticReport } from './src/diagnostic-report.js';
 import { captureChatSource, isChatSourceCurrent, captureMessageSource, isMessageSourceCurrent, snapshotGenerationSettings } from './src/task-context.js';
 import { mergeReferenceViews, modifyReferenceViews } from './src/reference-state.js';
+import { createComfySetupUI } from './src/comfy-setup-ui.js';
+import { createCharacterLoraUI } from './src/character-lora-ui.js';
+import { createCharacterIdentityUI } from './src/character-identity-ui.js';
+import { selectCharacterLoras } from './src/character-lora.js';
+import { buildReferencePlan, referenceBudgetFor } from './src/reference-plan.js';
+import { openReferenceAnnotation } from './src/reference-annotation.js';
+import { saveAnnotatedReference } from './src/reference-annotation-save.js';
+import { getCardActors } from './src/card-cast.js';
+import { createCardCastUI } from './src/card-cast-ui.js';
+import { createLocalPixelsUI } from './src/local-pixels-ui.js';
 // ============================================================
-// RP 电影配图 (rp-cinematic-imagegen) v2.9.62
+// RP 电影配图 (rp-cinematic-imagegen) v2.9.63
 // ------------------------------------------------------------
 // 核心功能：【双镜头模式 · 电影感分镜 · 图生图参考 · 全源聚合图库】
 // 现代深色电影工作台重构版
@@ -67,6 +77,7 @@ import {
     BACKENDS,
     generateImage,
     generateLocalDetailEdit,
+    getLocalRenderParameters,
 } from './src/backends.js';
 
 import { callLLM } from './src/llm.js';
@@ -93,13 +104,13 @@ import {
 } from './src/auto.js';
 
 import { normalizeCastCharacters } from './src/cast.js';
-import { resolveCastReferencePlan } from './src/character-identities.js';
+import { resolveCastReferencePlan, effectiveCharacterIdentity } from './src/character-identities.js';
 
 // ------------------------------------------------------------
 // 常量定义与默认设置
 // ------------------------------------------------------------
 const extensionName = 'rp-cinematic-imagegen';
-const pluginVersion = '2.9.62';
+const pluginVersion = '2.9.63';
 
 const defaultSettings = {
     // 图片后端
@@ -108,6 +119,8 @@ const defaultSettings = {
     backendKey: '',
     backendModel: '',
     imageSize: '16:9',
+    localImageWidth: '',
+    localImageHeight: '',
     stylePreset: 'reference',
     shotMode: 'snapshot',       // snapshot=🎬 剧情剧照抓拍 portrait=👤 角色微表情特写
     omniscientMode: true,       // 焦点镜头后增加全人物上帝视角分析
@@ -119,6 +132,16 @@ const defaultSettings = {
     comfyPositiveNodeId: '',
     comfyNegativeNodeId: '',
     comfyImageNodeId: '',
+    comfyPreset: 'custom',
+    comfySamplingProfile: 'standard',
+    comfyCheckpoint: '',
+    comfyUnet: '',
+    comfyClip: '',
+    comfyVae: '',
+    comfySteps: '',
+    comfyCfg: '',
+    comfySeed: '',
+    comfyDenoise: '',
     // 自动模式
     autoMode: false,
     autoCooldown: 3,     // 至少间隔 N 条消息才再次检测
@@ -147,6 +170,10 @@ const defaultSettings = {
     hideHandsFeet: false,
     continuityDenoising: 0.48,
     characterAnchors: {},
+    characterLoras: {},
+    characterIdentityOverrides: {},
+    characterCast: {},
+    qwenReferenceLimit: 3,
     selectedTargetCharacter: 'auto',
     // 本地 Qwen 桥接专有设置
     isLocalQwenBridge: false,
@@ -229,66 +256,89 @@ function loadSettings() {
     }
 }
 
-function getAllCharacters() {
+function getAllCharacters(settings = getSettings()) {
     const context = getContext();
     const rawList = context.characters || (typeof window !== 'undefined' && window.characters) || [];
     const list = [];
     if (Array.isArray(rawList)) {
         rawList.forEach((char, index) => {
             if (char && typeof char === 'object' && (char.name || char.avatar)) {
+                const effective = effectiveCharacterIdentity(char, settings);
                 list.push({
                     index: index,
-                    name: char.name || `角色 #${index}`,
+                    name: effective.name || `角色 #${index}`,
+                    cardTitle: effective.cardTitle,
                     avatar: char.avatar || '',
-                    raw: char,
+                    raw: effective,
                 });
+                for (const actor of getCardActors(effective, settings)) {
+                    list.push({ index, name: actor.name, cardTitle: actor.cardTitle,
+                        avatar: actor.avatar, raw: actor });
+                }
             }
         });
     }
     return list;
 }
 
-function getCurrentCharacter() {
-    const s = getSettings();
+function findCharacterResource(chars, value) {
+    if (!value) return null;
+    const avatar = chars.find(card => card.avatar && card.avatar === value);
+    if (avatar) return avatar;
+    const named = chars.filter(card => card.raw.hasExplicitIdentity && card.name === value);
+    if (named.length) return named.length === 1 ? named[0] : null;
+    const matches = chars.filter(card => card.name === value || card.cardTitle === value);
+    return matches.length === 1 ? matches[0] : null;
+}
+
+function getCurrentCharacter(s = getSettings()) {
     const context = getContext();
-    const chars = getAllCharacters();
+    const chars = getAllCharacters(s);
 
     if (s.selectedTargetCharacter && s.selectedTargetCharacter !== 'auto') {
-        const found = chars.find(c => c.avatar === s.selectedTargetCharacter || c.name === s.selectedTargetCharacter);
+        const found = findCharacterResource(chars, s.selectedTargetCharacter);
         if (found) return found.raw;
+        if (chars.some(card => card.name === s.selectedTargetCharacter || card.cardTitle === s.selectedTargetCharacter)) return null;
     }
 
     const chid = context.characterId;
     if (chid !== undefined && chid !== null && chid >= 0) {
         if (context.characters && context.characters[chid]) {
-            return context.characters[chid];
+            return effectiveCharacterIdentity(context.characters[chid], s);
         }
     }
 
     const chat = context.chat || [];
     for (let i = chat.length - 1; i >= 0; i--) {
         if (!chat[i].is_user && (chat[i].original_avatar || chat[i].name)) {
-            const found = chars.find(c => (chat[i].original_avatar && c.avatar === chat[i].original_avatar) || (chat[i].name && c.name === chat[i].name));
+            const found = chat[i].original_avatar
+                ? chars.find(card => card.avatar === chat[i].original_avatar)
+                : findCharacterResource(chars, chat[i].name);
             if (found) return found.raw;
+            if (chat[i].original_avatar) return null;
+            // The latest speaker is ambiguous; do not silently bind an earlier speaker's library.
+            if (chars.some(card => card.name === chat[i].name || card.cardTitle === chat[i].name)) return null;
         }
     }
 
-    if (chars.length > 0) return chars[0].raw;
+    const hostCards = chars.filter(card => !card.raw.rpigActor);
+    if (hostCards.length === 1) return hostCards[0].raw;
     return null;
 }
 
-function getCharacterForMessage(message) {
+function getCharacterForMessage(message, settings = getSettings()) {
     if (!message || message.is_user) return null;
-    const chars = getAllCharacters();
+    const chars = getAllCharacters(settings);
     if (message.original_avatar) {
-        const found = chars.find(c => c.avatar === message.original_avatar);
-        if (found) return found.raw;
+        const found = chars.find(card => card.avatar === message.original_avatar);
+        return found?.raw || null;
     }
     if (message.name) {
-        const found = chars.find(c => c.name === message.name);
+        const found = findCharacterResource(chars, message.name);
         if (found) return found.raw;
+        if (chars.some(card => card.name === message.name || card.cardTitle === message.name)) return null;
     }
-    return getCurrentCharacter();
+    return getCurrentCharacter(settings);
 }
 
 function getFinalizerLlmSettings(settings) {
@@ -303,7 +353,7 @@ function getFinalizerLlmSettings(settings) {
     };
 }
 
-function buildParticipantContext(context, chat, messageIndex, focalCharacter, customAnchors = {}) {
+function buildParticipantContext(context, chat, messageIndex, focalCharacter, customAnchors = {}, identitySettings = getSettings()) {
     const start = Math.max(0, messageIndex - 12);
     const recent = Array.isArray(chat) ? chat.slice(start, messageIndex + 1) : [];
     const latestText = stripHtml(chat?.[messageIndex]?.mes || '');
@@ -312,7 +362,10 @@ function buildParticipantContext(context, chat, messageIndex, focalCharacter, cu
     const recentSpeakerNames = new Set(recent
         .map(message => String(message?.name || '').trim())
         .filter(name => name && !/^(ai|assistant|bot|user|system|narrator)$/i.test(name)));
-    const candidates = Array.isArray(context?.characters) ? context.characters : [];
+    const candidates = Array.isArray(context?.characters) ? context.characters.flatMap(card => {
+        const effective = effectiveCharacterIdentity(card, identitySettings);
+        return [effective, ...getCardActors(effective, identitySettings)];
+    }) : [];
     const activeGroup = Array.isArray(context?.groups)
         ? context.groups.find(group => String(group?.id) === String(context?.groupId))
         : null;
@@ -322,7 +375,8 @@ function buildParticipantContext(context, chat, messageIndex, focalCharacter, cu
         const name = String(character?.name || '').trim();
         if (!name) continue;
         const isGroupMember = groupAvatars.has(character?.avatar);
-        const isRelevant = character === focalCharacter
+        const isRelevant = (character.avatar && character.avatar === focalCharacter?.avatar)
+            || (character.rpigActor && character.rpigParentAvatar === (focalCharacter?.rpigParentAvatar || focalCharacter?.avatar))
             || name === focalName
             || recentSpeakerNames.has(name)
             || latestText.includes(name)
@@ -339,27 +393,31 @@ function buildParticipantContext(context, chat, messageIndex, focalCharacter, cu
     const seen = new Set(['user']);
     for (const character of selected) {
         const name = String(character.name || '角色');
-        const identityKey = String(character.avatar || name).toLowerCase();
+        const identityKey = String(character.avatar || name);
         if (seen.has(identityKey)) continue;
         seen.add(identityKey);
         const anchor = getCharacterVisualAnchor(character, customAnchors);
         const description = stripHtml(character.data?.description || character.description || '')
             .replace(/\s+/g, ' ')
             .slice(0, 650);
-        const role = character === focalCharacter || name === focalName ? '当前回复角色候选' : '候选群聊角色';
-        const aliases = role === '当前回复角色候选' ? `；aliases=AI, Assistant, Bot, ${chat?.[messageIndex]?.name || ''}` : '';
-        lines.push(`- identity=character:${identityKey}；canonical_name=${name}；role=${role}；presence=unknown；群成员/消息说话人身份均不证明在场${aliases}${anchor ? `；视觉锚点=${anchor}` : ''}${description ? `；设定=${description}` : ''}`);
+        const role = character.rpigActor ? `卡内独立人物（所属卡片：${character.rpigParentTitle}）`
+            : character.avatar === focalCharacter?.avatar || name === focalName ? '当前回复角色卡候选' : '候选群聊角色卡';
+        const aliases = (character.aliases || []).join(', ');
+        const identityName = character.hasExplicitIdentity ? `canonical_name=${name}` : `card_title=${character.cardTitle || name}；真实人物姓名由正文与设定核对，卡片标题不默认是人名`;
+        lines.push(`- identity=character:${identityKey}；${identityName}；role=${role}；presence=unknown；群成员/消息说话人身份均不证明在场${aliases ? `；aliases=${aliases}` : ''}${anchor ? `；视觉锚点=${anchor}` : ''}${description ? `；设定=${description}` : ''}`);
     }
-    if (!lines.some(line => line.includes(`canonical_name=${focalName}`))) {
-        lines.push(`- identity=current-role；canonical_name=${focalName}；role=当前回复角色候选；presence=unknown；说话或叙述身份不自动证明身体入镜；aliases=AI, Assistant, Bot, ${chat?.[messageIndex]?.name || ''}`);
+    if (!selected.some(card => card.avatar && card.avatar === focalCharacter?.avatar)) {
+        const nameField = focalCharacter?.hasExplicitIdentity ? `canonical_name=${focalName}` : `card_title=${focalCharacter?.cardTitle || focalName}；真实人物姓名由正文核对，不能直接把卡片标题当成人名`;
+        lines.push(`- identity=current-role；${nameField}；role=当前回复角色卡候选；presence=unknown；说话或叙述身份不自动证明身体入镜`);
     }
+    lines.push('- 身份对应：真实姓名优先根据当前正文、卡片设定与已配置别名判断。卡片可能是世界设定或多人故事，不能把标题强塞给一个人物；只有确认同一身份时才在 aliases 中连接卡片称呼与正文姓名，不确定时保留真实人物，不胡乱绑定主图。');
     lines.push('- 其他 NPC：仅当最新焦点回合明确表明其身体处于当前镜头内时，才加入最终可见演员表；只被提及、回忆、通话或已经离场者不入镜。');
     return lines.join('\n');
 }
 
 async function getCharacterAvatarInfo(character, { fullOnly = false, signal } = {}) {
     throwIfAborted(signal);
-    if (!character || !character.avatar) return null;
+    if (!character || !character.avatar || character.rpigActor === true) return null;
     const context = getContext();
     const fullUrls = [
         `/characters/${encodeURIComponent(character.avatar)}`,
@@ -404,6 +462,13 @@ async function getCharacterAvatarInfo(character, { fullOnly = false, signal } = 
 }
 
 async function getCharacterAvatarDataUrl(character, { signal } = {}) {
+    if (character?.rpigActor === true) {
+        const views = activeReferenceViews(await getCharacterRefs(character));
+        const view = views.find(ref => ref.isPrimaryIdentity) || views[0];
+        if (view?.dataUrl) return view.dataUrl;
+        if (view?.url) return fetchToDataUrl(view.url, { signal });
+        throw new RpigError('CAST_REFERENCE_REQUIRED', `请先为「${character.name}」上传独立的主身份参考图。`);
+    }
     const info = await getCharacterAvatarInfo(character, { fullOnly: false, signal });
     if (info && info.dataUrl) return info.dataUrl;
     throw new RpigError('REFERENCE_AVATAR_FAILED', '角色卡原图和缩略图均读取失败，已停止生成。');
@@ -442,6 +507,7 @@ async function resolveCharacterReferences(charObj, charName, isVisible, { signal
                 isExplicitPrimary: false,
                 identityId: charIdentifier,
                 identityName: displayName,
+                identityDescription: charObj.description || charObj.data?.description || '',
             }));
         return { primaryRef, supportingRefs, primarySource: 'explicit-saved' };
     }
@@ -855,6 +921,7 @@ let rpigActiveTask = null;
 let rpigTaskSequence = 0;
 const rpigGenerationQueue = [];
 const rpigDetailEditorControllers = new Set();
+const rpigAnnotationControllers = new Set();
 const rpigImageRetryCache = createImageRetryCache();
 
 function setGenStatus(phase, text) {
@@ -936,7 +1003,7 @@ function cancelQueuedGeneration(taskId) {
         : task.kind === 'character-sheet' ? '已取消角色形象的排队任务' : `已取消消息 ${task.messageIndex + 1} 的排队任务`);
 }
 
-function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excludedCharacters, refs, shotLabel, signal }) {
+function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excludedCharacters, refs, shotLabel, signal, referencePlan, characterLoras = [], renderParameters }) {
     throwIfAborted(signal);
     $('.rpig-prompt-review-overlay').remove();
     $('body').removeClass('rpig-review-open');
@@ -962,6 +1029,8 @@ function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excl
     const promptInput = overlay.find('#rpig-review-prompt').val(prompt || '');
     const avoidInput = overlay.find('#rpig-review-avoid').val(avoid || '');
     overlay.find('.rpig-prompt-review-header small').text(shotLabel || '配图');
+    if (renderParameters?.description) overlay.find('.rpig-prompt-review-note').after(
+        $('<div class="rpig-prompt-review-note rpig-render-preview"></div>').text(renderParameters.description));
     const characterText = Array.isArray(visibleCharacters) && visibleCharacters.length
         ? visibleCharacters.map(item => typeof item === 'string' ? item : (item.name || item.character || '')).filter(Boolean).join('、')
         : '由最终提示词决定';
@@ -969,14 +1038,19 @@ function reviewFinalPrompt({ prompt, avoid, sceneAnchor, visibleCharacters, excl
         ? excludedCharacters.join('、')
         : '无';
     const referenceText = Array.isArray(refs) && refs.length
-        ? refs.map(ref => ref.label || '参考图').join('；')
+        ? refs.map((ref, index) => `${index + 1}. ${ref.identityName || '场景辅助'}：${ref.label || '参考图'}${ref.annotation ? '（标注裁切）' : ''}`).join('；')
         : '无';
     overlay.find('.rpig-prompt-review-meta').append(
         $('<div>').append($('<b>').text('场景锚点：'), document.createTextNode(sceneAnchor || '未指定')),
         $('<div>').append($('<b>').text('入镜角色：'), document.createTextNode(characterText)),
         $('<div>').append($('<b>').text('明确不入镜：'), document.createTextNode(excludedCharacterText)),
         $('<div>').append($('<b>').text('参考图片：'), document.createTextNode(referenceText)),
+        $('<div>').append($('<b>').text('角色 LoRA：'), document.createTextNode(characterLoras.length
+            ? characterLoras.map(lora => `${lora.name} · 模型强度 ${lora.strengthModel}${lora.triggerWords ? ` · 触发词：${lora.triggerWords}` : ''}`).join('；') : '本次未加载')),
     );
+    if (referencePlan?.omitted?.length) overlay.find('.rpig-prompt-review-meta').append(
+        $('<div>').append($('<b>').text('本次未发送：'), document.createTextNode(referencePlan.omitted
+            .map(({ ref, reason }) => `${ref.label || '辅助图'}：${reason}`).join('；'))));
 
     const updateCount = () => overlay.find('#rpig-review-prompt-count').text(`${String(promptInput.val() || '').length} 字符`);
     promptInput.on('input', updateCount);
@@ -1201,7 +1275,8 @@ async function executeGenerationTask(task) {
         const isSessionStillValid = () => isMessageSourceCurrent(sourceSnapshot, getContext());
 
         const s = snapshotGenerationSettings(getSettings());
-        const character = getCharacterForMessage(capturedMessage) || getCurrentCharacter();
+        const character = getCharacterForMessage(capturedMessage, s) || getCurrentCharacter(s);
+        let referenceBudget;
         const previousGenerated = s.usePreviousImage !== false
             ? getPreviousGeneratedImage(capturedChat, messageIndex, character, {
                 strictCharacterMatch: context.groupId !== undefined && context.groupId !== null && context.groupId !== '',
@@ -1227,6 +1302,10 @@ async function executeGenerationTask(task) {
             stage: 'start', referenceFailures: [], conflicts: [], references: [] };
 
         try {
+            referenceBudget = referenceBudgetFor(s);
+            if (referenceBudget.mode === 'text' && s.stylePreset === 'reference') {
+                throw new RpigError('COMFY_TEXT_REFERENCE_CONFLICT', '基础文生图不读取身份参考图，请选择跟随角色卡画风，或改用图生图 / 千问参考编辑预置。');
+            }
             const shotMode = explicitShotMode || s.shotMode || 'snapshot';
             const shotLabel = shotMode === 'portrait' ? '👤 微表情特写' : '🎬 剧情剧照';
             const promptFormat = s.stylePreset === 'reference' ? 'natural' : resolvePromptFormat(s);
@@ -1240,12 +1319,13 @@ async function executeGenerationTask(task) {
                 messageIndex,
                 character,
                 s.characterAnchors || {},
+                s,
             ), currentWorldAgeContext].filter(Boolean).join('\n');
 
             retrySignature = imageRetrySignature({ sessionKey: capturedSessionKey, messageIndex,
                 message: capturedMessage, sourceHistory: capturedSourceHistory, dialogueHistory, participantContext, character,
                 characterAnchor: getCharacterVisualAnchor(character, s.characterAnchors || {}),
-                previousGenerated, settings: s, shotMode, promptFormat, presetPrompt, presetAvoid, generationMeta });
+                previousGenerated, settings: s, shotMode, promptFormat, presetPrompt, presetAvoid, generationMeta, referenceBudget });
             if (s.imageRetryMode === 'reanalyze') rpigImageRetryCache.delete(capturedMessage);
             const cached = s.imageRetryMode === 'reanalyze' ? null : rpigImageRetryCache.get(capturedMessage, retrySignature);
             let structuredSceneState = cached?.sceneState || null;
@@ -1273,7 +1353,8 @@ async function executeGenerationTask(task) {
                 latestStory: capturedMes || '',
                 currentState: effectivePreviousState,
                 historySummary: dialogueHistory,
-                identityIndex: { focal_character: character?.name || null, player: context?.name1 || null },
+                identityIndex: { focal_character: character?.hasExplicitIdentity !== false ? character?.name || null : null,
+                    focal_card_title: character?.cardTitle || character?.name || null, player: context?.name1 || null },
             });
             if (currentWorldAgeContext) step1Prompt.system += '\n\n' + currentWorldAgeContext;
             const onLocalFallback = stage => ({reason}) => {
@@ -1283,7 +1364,10 @@ async function executeGenerationTask(task) {
                 toastr.info('当前阶段已自动切换到本地模型；完成后继续优先云端');
             };
             taskDiagnostics.stage = 'facts';
-            let step1Raw = await callLLM(step1Prompt.system, step1Prompt.userText, s, getContext, { signal, jsonMode: true, onFallback: onLocalFallback(1), validateResponse: raw => parseAnalysisResponse(raw, 1, { latestStory: capturedMes || '', previousState: effectivePreviousState }) });
+            let step1Raw = await callLLM(step1Prompt.system, step1Prompt.userText, s, getContext, { signal, jsonMode: true, onFallback: onLocalFallback(1), validateResponse: raw => {
+                taskDiagnostics.step1Raw = raw;
+                return parseAnalysisResponse(raw, 1, { latestStory: capturedMes || '', previousState: effectivePreviousState });
+            } });
             if (!isSessionStillValid()) {
                 toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                 return;
@@ -1318,10 +1402,11 @@ async function executeGenerationTask(task) {
                 chat: capturedChat,
                 messageIndex,
                 focalCharacter: character,
+                focalIdentityIsConfirmed: character?.hasExplicitIdentity !== false,
             };
             const characterNames = character ? (character.name || 'character') : 'character';
             const userName = String(context?.name1 || [...capturedChat].reverse().find(message => message?.is_user)?.name || 'User protagonist').trim();
-            const knownCharacters = `${characterNames}, ${userName}`;
+            const knownCharacters = `${character?.hasExplicitIdentity === false ? `当前卡片标题（不是默认人名）：${character.cardTitle || characterNames}` : characterNames}, ${userName}`;
 
             const step2Prompt = buildRelationCheckerPrompt({
                 latestStory: capturedMes || '',
@@ -1329,9 +1414,13 @@ async function executeGenerationTask(task) {
                 sceneFacts: sceneFacts,
                 characterNamesAndAliases: knownCharacters,
                 characterDesignContext: participantContext,
+                referenceBudget,
             });
             taskDiagnostics.stage = 'relations';
-            let step2Raw = await callLLM(step2Prompt.system, step2Prompt.userText, s, getContext, { signal, jsonMode: true, onFallback: onLocalFallback(2), validateResponse: raw => parseAnalysisResponse(raw, 2, { latestStory: capturedMes || '', momentEvidence: sceneFacts.moment_evidence, sceneFacts }) });
+            let step2Raw = await callLLM(step2Prompt.system, step2Prompt.userText, s, getContext, { signal, jsonMode: true, onFallback: onLocalFallback(2), validateResponse: raw => {
+                taskDiagnostics.step2Raw = raw;
+                return parseAnalysisResponse(raw, 2, { latestStory: capturedMes || '', momentEvidence: sceneFacts.moment_evidence, sceneFacts });
+            } });
             if (!isSessionStillValid()) {
                 toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                 return;
@@ -1365,7 +1454,10 @@ async function executeGenerationTask(task) {
                 characterDesignContext: participantContext,
             });
             taskDiagnostics.stage = 'instruction';
-            let step3Raw = await callLLM(step3Prompt.system, step3Prompt.userText, getFinalizerLlmSettings(s), getContext, { signal, jsonMode: true, onFallback: onLocalFallback(3), validateResponse: raw => parseAnalysisResponse(raw, 3, { latestStory: capturedMes || '' }) });
+            let step3Raw = await callLLM(step3Prompt.system, step3Prompt.userText, getFinalizerLlmSettings(s), getContext, { signal, jsonMode: true, onFallback: onLocalFallback(3), validateResponse: raw => {
+                taskDiagnostics.step3Raw = raw;
+                return parseAnalysisResponse(raw, 3, { latestStory: capturedMes || '' });
+            } });
             if (!isSessionStillValid()) {
                 toastr.info('消息内容已被改写、滑动或会话已切换，已中止并丢弃该配图生成任务');
                 return;
@@ -1423,7 +1515,7 @@ async function executeGenerationTask(task) {
             const userName = String(context?.name1 || [...capturedChat].reverse().find(message => message?.is_user)?.name || 'User protagonist').trim();
             const characterName = String(character?.name || '').trim();
             const castReferencePlan = resolveCastReferencePlan(visibleCharacters, {
-                characters:getAllCharacters(), focalCharacter:character, userName,
+                characters:getAllCharacters(s), focalCharacter:character, userName,
                 aliases:analysisSnapshot.castAliases, messageName:capturedMessage.name || '',
             });
             taskDiagnostics.castReferenceMatches = castReferencePlan.map(p=>({actorName:p.actorName,kind:p.kind,
@@ -1431,15 +1523,25 @@ async function executeGenerationTask(task) {
             const focalMatch=castReferencePlan.find(p=>p.kind==='character' && getCharacterIdentifier(p.character)===getCharacterIdentifier(character));
             const userMatch=castReferencePlan.find(p=>p.kind==='user');
             const userIsVisible=!!userMatch;
+            const loraSelection = selectCharacterLoras(s, castReferencePlan.map(match => ({
+                identityId: match.kind === 'user' ? 'user' : match.character?.avatar ? `character:${match.character.avatar}` : `story:${match.actorName}`,
+                identityName: match.actorName,
+            })), { backend: s.backend, preset: s.comfyPreset });
+            loraSelection.warnings.forEach(message => toastr.warning(message, '', { escapeHtml: true }));
+            taskDiagnostics.loraCount = loraSelection.loras.length;
 
             // 按照三级优先级明确解析角色与 User 的主身份与辅助参考图
             taskDiagnostics.stage = 'references';
+            if (referenceBudget.mode !== 'text') {
             const charRefResolved = await resolveCharacterReferences(character, focalMatch?.actorName || characterName, !!focalMatch, { signal });
+            if (focalMatch && !charRefResolved.primaryRef && s.stylePreset === 'reference') {
+                throw new RpigError('CAST_REFERENCE_REQUIRED', `入镜人物「${focalMatch.actorName}」的主身份图不可用，请上传或指定该人物参考图。`);
+            }
             const userRefResolved = await resolveUserReferences(userMatch?.actorName || userName, userIsVisible);
             if (userIsVisible && !userRefResolved.primaryRef && s.stylePreset === 'reference') {
                 throw new RpigError('USER_REFERENCE_REQUIRED', `${userName} 本次入镜，但没有玩家身份图；请上传 User 参考图，或确认玩家本次在画外`);
             }
-            let primarySourceUsed = charRefResolved.primarySource || userRefResolved.primarySource || 'none';
+            taskDiagnostics.primarySource = charRefResolved.primarySource || userRefResolved.primarySource || 'none';
 
             if (charRefResolved.primaryRef) {
                 pushUniqueRef(charRefResolved.primaryRef);
@@ -1461,16 +1563,21 @@ async function executeGenerationTask(task) {
                 if (match.character) {
                     const resolved = await resolveCharacterReferences(match.character, name, true, { signal });
                     if (!resolved.primaryRef && s.stylePreset === 'reference') throw new RpigError('CAST_REFERENCE_REQUIRED', `入镜人物「${name}」的主身份图不可用`);
-                    if (resolved.primaryRef) pushUniqueRef(resolved.primaryRef);
+                    if (resolved.primaryRef) {
+                        pushUniqueRef(resolved.primaryRef);
+                        if (!taskDiagnostics.primarySource || taskDiagnostics.primarySource === 'none') taskDiagnostics.primarySource = resolved.primarySource;
+                    }
                     resolved.supportingRefs.forEach(pushUniqueRef);
                 }
             }
+            }
+            const primarySourceUsed = taskDiagnostics.primarySource || (referenceBudget.mode === 'text' ? 'text-only' : 'none');
             if (!cached?.confirmedPrompt) {
                 const bubbleException = hasRequestedThoughtBubble(prompt) ? ' The requested same-person avatar inside the thought bubble is symbolic, not another physical cast member.' : '';
                 prompt += `\nVISIBLE CAST (${visibleCharacters.length}): ${visibleCharacters.join(', ') || 'none'}. Each listed person has one physical body in the main scene, within their specified visible range.${bubbleException} Aliases, translated names and clear pronouns in the instructions refer to these same identities, not additional people. References do not add people.`;
             }
 
-            const continuityReferenceAllowed = s.usePreviousImage !== false
+            const continuityReferenceAllowed = referenceBudget.mode !== 'text' && s.usePreviousImage !== false
                 && canUseContinuityReference(previousGenerated, capturedChat, structuredSceneState);
             if (continuityReferenceAllowed) {
                 pushUniqueRef({
@@ -1480,6 +1587,13 @@ async function executeGenerationTask(task) {
                     role: 'continuity',
                 });
             }
+            const referencePolicy = s.backend !== BACKENDS.COMFYUI && isLocalQwen(s) && s.qwenReferencePolicy === 'all' ? 'all' : 'auto';
+            const referencePlan = buildReferencePlan(refs, { ...referenceBudget, shotMode, policy: referencePolicy });
+            taskDiagnostics.referenceSelection = { supplied: refs.length, sent: referencePlan.refs.length,
+                policy: referencePolicy,
+                omitted: referencePlan.omitted.map(({ ref, reason }) => ({ identityName: ref.identityName, label: ref.label, reason })) };
+            refs.splice(0, refs.length, ...referencePlan.refs);
+            taskDiagnostics.referenceAssignments = referencePlan.assignments;
 
             prompt = cached?.confirmedPrompt || collapsePromptToSingleParagraph(buildSceneAwareImagePrompt({
                 basePrompt: prompt,
@@ -1504,6 +1618,9 @@ async function executeGenerationTask(task) {
                     refs,
                     shotLabel,
                     signal,
+                    referencePlan,
+                    characterLoras: loraSelection.loras,
+                    renderParameters: getLocalRenderParameters(s, refs, prompt),
                 });
                 if (!review.confirmed) {
                     rpigImageRetryCache.delete(capturedMessage);
@@ -1567,6 +1684,8 @@ async function executeGenerationTask(task) {
                 negativePrompt: mergedNegative,
                 requestId: requestId,
                 diagnostics: taskDiagnostics,
+                referencePlan,
+                characterLoras: loraSelection.loras,
             });
             rpigImageRetryCache.delete(capturedMessage);
 
@@ -1744,9 +1863,14 @@ async function renderCharacterSheetFlow({
         if (!isSourceValid()) throw createAbortError('角色形象任务的会话已切换');
     };
     ensureSource();
-    const character = targetCharacter || getCurrentCharacter();
-    if (!character) throw new Error('请先选择一个绑定的角色');
     const s = snapshotGenerationSettings(getSettings());
+    const character = effectiveCharacterIdentity(targetCharacter || getCurrentCharacter(s), s);
+    if (!character) throw new Error('请先选择一个绑定的角色');
+    if (character.rpigCastMemberCount && character.hasExplicitIdentity === false) {
+        throw new RpigError('CAST_REFERENCE_REQUIRED', '这张卡包含多位人物，请先在绑定角色列表中选择具体人物，再生成其参考图。');
+    }
+    const budget = referenceBudgetFor(s);
+    if (budget.mode === 'text') throw new RpigError('COMFY_SHEET_REFERENCE_REQUIRED', '角色形象以原图为参考，请改用基础图生图或千问参考编辑预置。');
 
     const avatarData = await getCharacterAvatarDataUrl(character, { signal });
     ensureSource();
@@ -1754,7 +1878,7 @@ async function renderCharacterSheetFlow({
 
     const isTags = resolvePromptFormat(s) === 'tags';
     const { prompt, avoid } = buildCharacterSheetPrompt({
-        character,
+        character: character.hasExplicitIdentity === false ? { ...character, name: 'the character depicted in the reference image' } : character,
         type,
         isTags,
         customPrompt,
@@ -1762,7 +1886,10 @@ async function renderCharacterSheetFlow({
 
     setGenStatus('working', '🎨 正在以原图为参考进行图生图渲染…');
     const refs = [{ dataUrl: avatarData, label: '角色卡原图', kind: 'identity-primary', role: 'identity-primary',
-        identityName: character.name, identityId: `character:${getCharacterIdentifier(character)}`, source: 'character-card' }];
+        identityName: character.hasExplicitIdentity ? character.name : 'the reference character', identityId: `character:${getCharacterIdentifier(character)}`, source: 'character-card' }];
+    const referencePlan = buildReferencePlan(refs, budget);
+    const loraSelection = selectCharacterLoras(s, [{ identityId: `character:${getCharacterIdentifier(character)}`, identityName: character.name }]);
+    loraSelection.warnings.forEach(message => toastr.warning(message, '', { escapeHtml: true }));
     const result = await generateImage(s, prompt, avoid, refs, {
         signal,
         assertSourceValid: ensureSource,
@@ -1771,6 +1898,8 @@ async function renderCharacterSheetFlow({
         onWarning: (msg) => toastr.warning(escapeHtml(msg)),
         slashCommandParser: SlashCommandParser,
         disableLimbSafeComposition: true,
+        referencePlan,
+        characterLoras: loraSelection.loras,
     });
     ensureSource();
 
@@ -2072,7 +2201,18 @@ function createUpstreamModelControl(input, fetchModels, onSelect) {
     return control;
 }
 
+let rpigSettingsAuxCleanup = () => {};
 function buildSettingsUI() {
+    rpigSettingsAuxCleanup();
+    const auxiliaryHandles = [];
+    let settingsPanelTimer;
+    let settingsPanelActive = true;
+    rpigSettingsAuxCleanup = () => {
+        settingsPanelActive = false;
+        clearTimeout(settingsPanelTimer);
+        auxiliaryHandles.forEach(handle => handle.destroy());
+        for (const controller of rpigAnnotationControllers) controller.abort(createAbortError('设置面板已重新打开'));
+    };
     const s = getSettings();
     const container = $(document.createElement('div')).addClass('rpig-settings');
 
@@ -2080,7 +2220,7 @@ function buildSettingsUI() {
     const header = $(`<div class="rpig-settings-header">
         <div class="rpig-header-left">
             <span class="rpig-header-title">🎬 RP 电影配图</span>
-            <span class="rpig-header-version">v2.9.62</span>
+            <span class="rpig-header-version">v2.9.63</span>
         </div>
         <div class="rpig-status-pill" id="rpig-header-status-pill">
             <span class="rpig-status-dot"></span>
@@ -2096,7 +2236,10 @@ function buildSettingsUI() {
             : s.backend === BACKENDS.SD ? 'Stable Diffusion'
             : s.backend === BACKENDS.COMFYUI ? 'ComfyUI'
             : '酒馆内置 SD';
-        const modelName = s.backendModel ? ` · ${s.backendModel}` : '';
+        const selectedModel = s.backend === BACKENDS.COMFYUI
+            ? (s.comfyPreset === 'qwen-edit' ? s.comfyUnet : s.comfyPreset === 'custom' ? '' : s.comfyCheckpoint)
+            : s.backendModel;
+        const modelName = selectedModel ? ` · ${selectedModel}` : '';
         header.find('.rpig-status-text').text(`${backendName}${modelName}`);
     };
     updateStatusPill();
@@ -2200,13 +2343,13 @@ function buildSettingsUI() {
     const modelRow = row('模型名称', imageModelControl, '点击“从上游获取”后可在下拉框选择，亦可手动输入');
 
     // 高级参数抽屉（SD / ComfyUI 参数）
-    const advancedToggle = $('<div class="rpig-advanced-toggle">⚙️ 高级参数（SD 步数 / CFG / 负面词 / ComfyUI 工作流） ▾</div>');
+    const advancedToggle = $('<div class="rpig-advanced-toggle">⚙️ 高级参数（参考图处理 / CFG / 工作流） ▾</div>');
     const advancedDrawer = $('<div class="rpig-advanced-drawer"></div>');
     advancedToggle.on('click', () => {
         advancedDrawer.toggleClass('rpig-open');
         advancedToggle.text(advancedDrawer.hasClass('rpig-open')
-            ? '⚙️ 高级参数（SD 步数 / CFG / 负面词 / ComfyUI 工作流） ▴'
-            : '⚙️ 高级参数（SD 步数 / CFG / 负面词 / ComfyUI 工作流） ▾');
+            ? '⚙️ 高级参数（参考图处理 / CFG / 工作流） ▴'
+            : '⚙️ 高级参数（参考图处理 / CFG / 工作流） ▾');
     });
 
     const sdStepsRow = row('SD 步数 (Steps)', sdStepsInput);
@@ -2219,7 +2362,7 @@ function buildSettingsUI() {
         .append($('<option value="768x432">标准档（横屏 768×448，随画幅适配）</option>'))
         .append($('<option value="1024x576">1024×576 (16:9 对照档)</option>'))
         .val(s.qwenResolution || '512x288');
-    const qwenResRow = row('Qwen 直接绘制分辨率', qwenResSelect, '关闭清晰绘制时使用此档位。默认512轻量档；超宽画幅直接绘制为512×256。清晰绘制会自动选择内部尺寸，最终保持所选画幅、长边512。');
+    const qwenResRow = row('Qwen 默认画幅档位', qwenResSelect, '未填写自定义像素时使用此档位。更改档位会关闭自动升档；实际像素和步数会在生成预览里显示。');
 
     const qwenSeedInput = $('<input type="number" step="1" placeholder="留空或 -1 为随机 Seed">')
         .val(s.qwenSeed !== undefined && s.qwenSeed !== '' && Number(s.qwenSeed) >= 0 ? s.qwenSeed : '');
@@ -2235,25 +2378,32 @@ function buildSettingsUI() {
     const qwenProfileRow = row('Qwen 参考图处理', qwenProfileSelect, '保持完整图像和长宽比；只影响本次输入的处理尺寸，原始上传图保留。');
     const qwenReferencePolicySelect = $('<select aria-label="Qwen 参考图发送">').append('<option value="story">剧情优先：各人物主身份图与脸部特写</option><option value="all">全部启用图：保留辅助设计图，耗时更多</option>').val(s.qwenReferencePolicy || 'story');
     const qwenReferencePolicyRow = row('Qwen 参考图发送', qwenReferencePolicySelect, '剧情优先减少旧服装与三视图的干扰，每个入镜人物保留自己的身份图；全部模式发送所有启用参考图。');
+    const qwenReferenceLimitInput = $('<input type="number" min="1" max="8" step="1" aria-label="本地千问参考图容量">').val(s.qwenReferenceLimit || 3);
+    const qwenReferenceLimitRow = row('本地千问参考图容量', qwenReferenceLimitInput, '默认 3 张。只在你的本地图片服务明确支持更多图片时提高；超额会在发送前提示，人物主图优先。ComfyUI 预置按自身固定容量处理。');
+    qwenReferenceLimitInput.on('input change', () => {
+        const limit = Number(qwenReferenceLimitInput.val());
+        if (!Number.isInteger(limit) || limit < 1 || limit > 8) { qwenReferenceLimitInput.val(s.qwenReferenceLimit || 3); return; }
+        s.qwenReferenceLimit = limit; saveSettingsDebounced();
+    });
     qwenReferencePolicySelect.on('change', () => { s.qwenReferencePolicy = qwenReferencePolicySelect.val(); saveSettingsDebounced(); });
     const qwenIdentityDetailInput = $('<input type="checkbox" aria-label="人物细节优先">').prop('checked', s.qwenIdentityDetailBoost === true).prop('disabled', s.qwenResolution === '512x288');
     const qwenIdentityDetailRow = row('人物细节优先', qwenIdentityDetailInput, '512轻量档禁用自动升档。其他档默认关闭；开启会使用高档输出和细节参考处理，最多20步，多图可能需要数分钟。');
-    qwenIdentityDetailInput.on('change', () => { s.qwenIdentityDetailBoost = qwenIdentityDetailInput.prop('checked'); saveSettingsDebounced(); });
-    const qwenSceneDetailInput = $('<input type="checkbox" aria-label="清晰绘制，最终512">').prop('checked',s.qwenSceneDetail === true);
-    const qwenSceneDetailRow = row('清晰绘制，最终512',qwenSceneDetailInput,'原图参考模式下，普通剧情整张高分辨率绘制一次，再缩为当前画幅、长边512；保留步数与CFG，多人图需要数分钟。镜面与倒影场景沿用原绘制档。');
-    qwenSceneDetailInput.on('change',()=>{s.qwenSceneDetail=qwenSceneDetailInput.prop('checked');updateBackendVisibility();saveSettingsDebounced();});
+    qwenIdentityDetailInput.on('change', () => { s.qwenIdentityDetailBoost = qwenIdentityDetailInput.prop('checked'); if(s.qwenIdentityDetailBoost){s.localImageWidth='';s.localImageHeight='';} updateBackendVisibility(); saveSettingsDebounced(); });
+    const qwenSceneDetailInput = $('<input type="checkbox" aria-label="1024绘制后缩为512">').prop('checked',s.qwenSceneDetail === true);
+    const qwenSceneDetailRow = row('1024绘制后缩为512',qwenSceneDetailInput,'开启后普通参考图剧情按1024档绘制，再缩小输出，所需显存与耗时按1024档计算。修改本地像素或步数会关闭此选项；镜面与倒影场景沿用直接绘制档。');
+    qwenSceneDetailInput.on('change',()=>{s.qwenSceneDetail=qwenSceneDetailInput.prop('checked');if(s.qwenSceneDetail){s.localImageWidth='';s.localImageHeight='';}updateBackendVisibility();saveSettingsDebounced();});
     const qwenCacheSelect = $('<select aria-label="Qwen 参考缓存">')
         .append('<option value="q8_0">8 位：保留更多参考细节</option><option value="q4_0">4 位：显存不足时使用</option>')
         .val(s.qwenCacheType || 'q8_0');
     const qwenCacheRow = row('Qwen 参考缓存', qwenCacheSelect);
-    qwenStepsInput.on('input change', () => { s.qwenSteps = qwenSteps(qwenStepsInput.val()); saveSettingsDebounced(); });
+    qwenStepsInput.on('input change', () => { s.qwenSteps = qwenSteps(qwenStepsInput.val()); s.qwenSceneDetail=false;s.qwenIdentityDetailBoost=false;updateBackendVisibility();saveSettingsDebounced(); });
     qwenCfgInput.on('input change', () => { s.qwenCfg = Math.max(1, Math.min(10, Number(qwenCfgInput.val()) || 1)); saveSettingsDebounced(); });
     qwenProfileSelect.on('change', () => { s.qwenReferenceProfile = qwenProfileSelect.val(); saveSettingsDebounced(); });
     qwenCacheSelect.on('change', () => { s.qwenCacheType = qwenCacheSelect.val(); saveSettingsDebounced(); });
 
     qwenResSelect.on('change', () => {
         s.qwenResolution = qwenResSelect.val();
-        if (s.qwenResolution === '512x288') { s.qwenIdentityDetailBoost = false; qwenIdentityDetailInput.prop('checked', false); }
+        s.localImageWidth='';s.localImageHeight='';s.qwenSceneDetail=false;s.qwenIdentityDetailBoost=false;
         updateBackendVisibility();
         saveSettingsDebounced();
     });
@@ -2266,8 +2416,17 @@ function buildSettingsUI() {
     const comfyPosRow = row('正向节点 ID', comfyPosNodeInput);
     const comfyNegRow = row('负向节点 ID', comfyNegNodeInput);
     const comfyImgRow = row('参考图节点 ID', comfyImgNodeInput);
+    const comfySetup = createComfySetupUI({
+        $, settings: s, getSettings,
+        saveSettings: saveSettingsDebounced,
+        onChange: () => { updateBackendVisibility(); updateStatusPill(); },
+    });
+    auxiliaryHandles.push(comfySetup);
 
-    advancedDrawer.append(qwenSceneDetailRow, qwenIdentityDetailRow, qwenStepsRow, qwenCfgRow, qwenReferencePolicyRow, qwenProfileRow, qwenCacheRow, qwenResRow, qwenSeedRow, sdStepsRow, sdCfgRow, sdNegRow, comfyWorkflowRow, comfyPosRow, comfyImgRow);
+    const localPixels = createLocalPixelsUI({ $, getSettings, getParameters: getLocalRenderParameters,
+        saveSettings: saveSettingsDebounced, onChange: () => updateBackendVisibility() });
+    auxiliaryHandles.push(localPixels);
+    advancedDrawer.append(qwenSceneDetailRow, qwenIdentityDetailRow, qwenCfgRow, qwenReferencePolicyRow, qwenReferenceLimitRow, qwenProfileRow, qwenCacheRow, qwenResRow, qwenSeedRow, sdCfgRow, sdNegRow, comfyWorkflowRow, comfyPosRow, comfyNegRow, comfyImgRow);
 
     function updateBackendVisibility() {
         const cur = backendSelect.val();
@@ -2275,21 +2434,27 @@ function buildSettingsUI() {
         keyRow.toggle(cur === BACKENDS.OPENAI || cur === BACKENDS.GEMINI);
         modelRow.toggle(cur === BACKENDS.OPENAI || cur === BACKENDS.GEMINI);
         sdStepsRow.toggle(cur === BACKENDS.SD);
+        qwenStepsRow.toggle(isLocalQwen(s));
         sdCfgRow.toggle(cur === BACKENDS.SD);
         sdNegRow.toggle(cur === BACKENDS.SD);
-        comfyWorkflowRow.toggle(cur === BACKENDS.COMFYUI);
-        comfyPosRow.toggle(cur === BACKENDS.COMFYUI);
-        comfyNegRow.toggle(cur === BACKENDS.COMFYUI);
-        comfyImgRow.toggle(cur === BACKENDS.COMFYUI);
+        const customComfy = cur === BACKENDS.COMFYUI && comfySetup.presetId === 'custom';
+        comfyWorkflowRow.toggle(customComfy);
+        comfyPosRow.toggle(customComfy);
+        comfyNegRow.toggle(customComfy);
+        comfyImgRow.toggle(customComfy);
+        comfySetup.refresh();
         const localQwen = isLocalQwen(s);
+        qwenSceneDetailInput.prop('checked',s.qwenSceneDetail === true);
+        qwenIdentityDetailInput.prop('checked',s.qwenIdentityDetailBoost === true);
         const sceneDetail = localQwen && s.stylePreset === 'reference' && s.qwenSceneDetail === true;
         qwenResSelect.prop('disabled',sceneDetail);
         qwenProfileSelect.prop('disabled',sceneDetail);
         qwenIdentityDetailInput.prop('disabled',sceneDetail || s.qwenResolution === '512x288');
-        [qwenSceneDetailRow, qwenIdentityDetailRow, qwenStepsRow, qwenCfgRow, qwenReferencePolicyRow, qwenProfileRow, qwenCacheRow, qwenResRow, qwenSeedRow].forEach(element => element.toggle(localQwen));
-        const hasAdvanced = localQwen || cur === BACKENDS.SD || cur === BACKENDS.COMFYUI;
+        [qwenSceneDetailRow, qwenIdentityDetailRow, qwenStepsRow, qwenCfgRow, qwenReferencePolicyRow, qwenReferenceLimitRow, qwenProfileRow, qwenCacheRow, qwenResRow, qwenSeedRow].forEach(element => element.toggle(localQwen));
+        const hasAdvanced = localQwen || cur === BACKENDS.SD || customComfy;
         advancedToggle.toggle(hasAdvanced);
         advancedDrawer.toggle(hasAdvanced);
+        localPixels.refresh();
     }
 
     backendSelect.on('change', () => {
@@ -2302,7 +2467,9 @@ function buildSettingsUI() {
     urlInput.on('input', () => { s.backendUrl = urlInput.val(); updateBackendVisibility(); saveSettingsDebounced(); });
     keyInput.on('input', () => { s.backendKey = keyInput.val(); saveSettingsDebounced(); });
     modelInput.on('input', () => { s.backendModel = modelInput.val(); updateBackendVisibility(); saveSettingsDebounced(); updateStatusPill(); });
-    sdStepsInput.on('input', () => { s.sdSteps = parseInt(sdStepsInput.val(), 10) || 28; saveSettingsDebounced(); });
+    sdStepsInput.on('input change', () => { s.sdSteps = Math.max(1,Math.min(150,parseInt(sdStepsInput.val(),10)||28)); localPixels.refresh();saveSettingsDebounced(); });
+    sdStepsInput.on('change',()=>sdStepsInput.val(s.sdSteps));
+    qwenStepsInput.on('change',()=>qwenStepsInput.val(s.qwenSteps));
     sdCfgInput.on('input', () => { s.sdCfg = parseFloat(sdCfgInput.val()) || 7; saveSettingsDebounced(); });
     sdNegInput.on('input', () => { s.sdNegative = sdNegInput.val(); saveSettingsDebounced(); });
     comfyWorkflowInput.on('input', () => { s.comfyWorkflow = comfyWorkflowInput.val(); saveSettingsDebounced(); });
@@ -2311,12 +2478,14 @@ function buildSettingsUI() {
     comfyImgNodeInput.on('input', () => { s.comfyImageNodeId = comfyImgNodeInput.val().trim(); saveSettingsDebounced(); });
     promptFormatSelect.on('change', () => { s.promptFormat = promptFormatSelect.val(); saveSettingsDebounced(); });
     styleSelect.on('change', () => { s.stylePreset = styleSelect.val(); updateBackendVisibility(); saveSettingsDebounced(); if (typeof window.rpigRefreshFloatingStatus === 'function') window.rpigRefreshFloatingStatus(); });
-    sizeSelect.on('change', () => { s.imageSize = sizeSelect.val(); saveSettingsDebounced(); if (typeof window.rpigRefreshFloatingStatus === 'function') window.rpigRefreshFloatingStatus(); });
+    sizeSelect.on('change', () => { s.imageSize = sizeSelect.val(); updateBackendVisibility();saveSettingsDebounced(); if (typeof window.rpigRefreshFloatingStatus === 'function') window.rpigRefreshFloatingStatus(); });
 
     card1.body.append(row('生图后端类型', backendSelect));
     card1.body.append(urlRow);
+    card1.body.append(comfySetup.element);
     card1.body.append(keyRow);
     card1.body.append(modelRow);
+    card1.body.append(localPixels.element, qwenStepsRow, sdStepsRow);
     card1.body.append(row('画幅比例', sizeSelect));
     card1.body.append(row('画风偏好', styleSelect));
     card1.body.append(row('提示词格式', promptFormatSelect));
@@ -2572,6 +2741,17 @@ function buildSettingsUI() {
     charBar.append(charSelect).append(refreshCharListBtn).append(openGalleryBtn);
     card6.body.append(row('绑定角色', charBar));
 
+    const cardCastUI = createCardCastUI({ $, getSettings,
+        getSelectedCharacter: () => getCurrentCharacter(), saveSettings: saveSettingsDebounced,
+        onSelect: actor => { s.selectedTargetCharacter = actor.avatar; saveSettingsDebounced(); updateCharacterSelectorUI(); } });
+    const characterIdentityUI = createCharacterIdentityUI({ $, getSettings, getCharacterIdentifier,
+        getSelectedCharacter: () => getCurrentCharacter(),
+        saveSettings: () => { saveSettingsDebounced(); updateCharacterSelectorUI(); } });
+    const characterLoraUI = createCharacterLoraUI({ $, getSettings, getCharacterIdentifier,
+        getSelectedCharacter: () => getCurrentCharacter(), saveSettings: saveSettingsDebounced });
+    auxiliaryHandles.push(cardCastUI, characterIdentityUI, characterLoraUI);
+    card6.body.append(cardCastUI.element, characterIdentityUI.element, characterLoraUI.element);
+
     openGalleryBtn.on('click', () => { openGallery(getCurrentCharacter()); });
 
     const charSummaryBox = $(`<div class="rpig-char-summary">
@@ -2590,7 +2770,7 @@ function buildSettingsUI() {
         charSelect.empty();
         charSelect.append($('<option value="auto">🌟 自动跟随当前聊天角色</option>'));
         allChars.forEach(c => {
-            const opt = $('<option>').attr('value', c.avatar || c.name).text(c.name);
+            const opt = $('<option>').attr('value', c.avatar || c.name).text(c.raw.rpigActor ? `${c.cardTitle} › ${c.name}` : c.name);
             charSelect.append(opt);
         });
         charSelect.val(s.selectedTargetCharacter || 'auto');
@@ -2599,8 +2779,12 @@ function buildSettingsUI() {
 
     let characterDetailsVersion = 0;
     async function updateCharacterDetails() {
+        if (!settingsPanelActive) return;
         const version = ++characterDetailsVersion;
         const liveChar = getCurrentCharacter();
+        cardCastUI.refresh();
+        characterIdentityUI.refresh();
+        characterLoraUI.refresh();
         refsList.empty().append($('<div class="rpig-ref-empty">').text('正在读取参考图…'));
         void refreshRefsList();
         if (!liveChar) {
@@ -2615,7 +2799,7 @@ function buildSettingsUI() {
         let avatarData = null;
         try { avatarData = await getCharacterAvatarDataUrl(liveChar); }
         catch (error) { console.warn('[RP 电影配图] 头像预览不可用:', scrubSensitiveText(error.message)); }
-        if (version !== characterDetailsVersion || getCharacterIdentifier(liveChar) !== getCharacterIdentifier(getCurrentCharacter())) return;
+        if (!settingsPanelActive || version !== characterDetailsVersion || getCharacterIdentifier(liveChar) !== getCharacterIdentifier(getCurrentCharacter())) return;
         if (avatarData) {
             charSummaryBox.find('.rpig-summary-avatar').attr('src', avatarData).show();
         } else {
@@ -2675,6 +2859,7 @@ function buildSettingsUI() {
 
     let refsRefreshVersion = 0;
     async function refreshRefsList() {
+        if (!settingsPanelActive) return;
         const version = ++refsRefreshVersion;
         const liveChar = getCurrentCharacter();
         let views;
@@ -2717,7 +2902,7 @@ function buildSettingsUI() {
                     }
                 });
 
-                const del = $('<button title="删除参考图">✕</button>');
+                const del = $('<button type="button" class="rpig-ref-delete" title="删除参考图">✕</button>');
                 del.on('click', async (e) => {
                     e.stopPropagation();
                     try {
@@ -2739,7 +2924,9 @@ function buildSettingsUI() {
                     try { await updateCharacterRefs(liveChar, current => modifyReferenceViews(current, view, 'enabled', enabled.prop('checked'))); }
                     catch (error) { toastr.error(`参考图状态保存失败：${escapeHtml(error.message)}`); await refreshRefsList(); }
                 });
-                item.append(img, primaryBtn, label, purpose, $('<label>').append(enabled, ' 使用本图'), del);
+                const annotate = $('<button type="button" class="rpig-ref-annotate">标注 / 裁剪</button>');
+                annotate.on('click', event => { event.stopPropagation(); void annotateReference(liveChar, view); });
+                item.append(img, primaryBtn, label, purpose, $('<label>').append(enabled, ' 使用本图'), annotate, del);
                 refsList.append(item);
             });
         }
@@ -2896,6 +3083,7 @@ function buildSettingsUI() {
 
     let userRefsRefreshVersion = 0;
     async function refreshUserRefsList() {
+        if (!settingsPanelActive) return;
         const version = ++userRefsRefreshVersion;
         const displayName = currentUserDisplayName();
         userRefsTitle.text(`👤 User 三视图 / 多视角参考图 · ${displayName}`);
@@ -2940,7 +3128,7 @@ function buildSettingsUI() {
                 }
             });
 
-            const del = $('<button title="删除 User 参考图">✕</button>');
+            const del = $('<button type="button" class="rpig-ref-delete" title="删除 User 参考图">✕</button>');
             del.on('click', async (e) => {
                 e.stopPropagation();
                 try {
@@ -2950,7 +3138,9 @@ function buildSettingsUI() {
                     toastr.error(`删除 User 参考图失败：${escapeHtml(error.message)}`);
                 }
             });
-            item.append(img, primaryBtn, label, del);
+            const annotate = $('<button type="button" class="rpig-ref-annotate">标注 / 裁剪</button>');
+            annotate.on('click', event => { event.stopPropagation(); void annotateReference('user', view); });
+            item.append(img, primaryBtn, label, annotate, del);
             userRefsList.append(item);
         });
     }
@@ -2994,7 +3184,44 @@ function buildSettingsUI() {
     });
 
     userRefsBox.append(userRefsHeader, userRefsHint, userUploadBtn, userUploadInput, userImportBtn, userImportInput, userExportBtn, userRefsList);
+    const userLoraUI = createCharacterLoraUI({ $, getSettings, getCharacterIdentifier,
+        getSelectedCharacter: () => 'user', saveSettings: saveSettingsDebounced });
+    auxiliaryHandles.push(userLoraUI);
+    userRefsBox.append(userLoraUI.element);
     card6.body.append(userRefsBox);
+    backendSelect.on('change.rpigRoleSettings', () => { characterLoraUI.refresh(); userLoraUI.refresh(); });
+    urlInput.on('input.rpigRoleSettings change.rpigRoleSettings', () => { characterLoraUI.refresh(); userLoraUI.refresh(); });
+
+    async function annotateReference(sourceCharacter, sourceView) {
+        const contextSnapshot = captureOverlayContext(getContext());
+        const controller = new AbortController();
+        // One editor at a time avoids saving a crop from a hidden older dialog.
+        for (const previous of rpigAnnotationControllers) previous.abort(createAbortError('已打开另一张参考图'));
+        rpigAnnotationControllers.add(controller);
+        const capturedTargets = [
+            ...getAllCharacters().filter(card => card.avatar).map(card => ({ id: `character:${card.avatar}`, name: card.name, character: { ...card.raw } })),
+            { id: 'user', name: currentUserDisplayName(), character: 'user' },
+        ];
+        const isCurrent = () => settingsPanelActive && contextSnapshot.isCurrent(getContext());
+        try {
+            const dataUrl = sourceView.dataUrl || await fetchToDataUrl(sourceView.url, { signal: controller.signal });
+            throwIfAborted(controller.signal);
+            if (!isCurrent()) throw createAbortError('会话已切换');
+            const saved = await openReferenceAnnotation({ dataUrl, label: sourceView.label, sourceRefId: sourceView.refId,
+                targets: capturedTargets.map(({ id, name }) => ({ id, name })),
+                initialTargetId: sourceCharacter === 'user' ? 'user' : `character:${sourceCharacter.avatar}`,
+                signal: controller.signal, isCurrent,
+                onSave: (result, guards) => saveAnnotatedReference(result, { sourceCharacter, sourceView,
+                    targets: capturedTargets, getCharacterRefs, updateCharacterRefs, maxRefs: MAX_REFS_PER_CHAR, ...guards }),
+            });
+            if (!saved.cancelled && isCurrent()) {
+                await Promise.all([refreshRefsList(), refreshUserRefsList()]);
+                toastr.success('已另存角色参考图，原图保留');
+            }
+        } catch (error) {
+            if (!isAbortError(error)) toastr.error(scrubSensitiveText(error.message || String(error)), '', { escapeHtml: true });
+        } finally { rpigAnnotationControllers.delete(controller); }
+    }
     grid.append(card6.card);
 
     // 错误报告只在用户点击时下载到本机，文字诊断由用户明确选择。
@@ -3014,7 +3241,7 @@ function buildSettingsUI() {
     grid.append(reportCard.card);
 
     container.append(grid);
-    setTimeout(() => { updateCharacterSelectorUI(); refreshUserRefsList(); }, 100);
+    settingsPanelTimer = setTimeout(() => { updateCharacterSelectorUI(); refreshUserRefsList(); }, 100);
 
     return container;
 }
@@ -3024,7 +3251,7 @@ function buildFloatingUI() {
 
     const panel = $(`<div class="rpig-fab-panel" style="display:none">
         <div class="rpig-fab-header" title="按住此处可自由拖动面板位置">
-            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.62</small></span>
+            <span class="rpig-fab-header-title"><span class="rpig-drag-handle">⠿</span>🎬 RP 电影配图 <small class="rpig-header-version">v2.9.63</small></span>
             <span class="rpig-fab-header-close" title="收起面板（亦可点击外部任意处收起）">✕</span>
         </div>
 
@@ -3438,7 +3665,7 @@ function mountSettingsPanel() {
     const container = $(`<div id="rpig_container" class="extension_container">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.62</b>
+                <b data-i18n="rpig_title">🎬 RP 电影配图 v2.9.63</b>
                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
             </div>
             <div class="inline-drawer-content"></div>
@@ -3503,6 +3730,7 @@ jQuery(async function () {
         rpigOverlays.closeAll();
         rpigImageRetryCache.clear();
         for (const controller of rpigDetailEditorControllers) controller.abort(createAbortError('会话已切换'));
+        for (const controller of rpigAnnotationControllers) controller.abort(createAbortError('会话已切换'));
         rpigActiveTask?.controller.abort(createAbortError('会话已切换'));
         const removed = rpigGenerationQueue.splice(0);
         for (const task of removed) task.resolve({ cancelled: true, queued: true });
@@ -3531,5 +3759,5 @@ jQuery(async function () {
     }
     setTimeout(scanAndInjectAllMessages, 500);
 
-    console.log('[RP 电影配图 v2.9.62] User 三视图、结构化焦点分析与完整工作台已启用。');
+    console.log('[RP 电影配图 v2.9.63] User 三视图、结构化焦点分析与完整工作台已启用。');
 });

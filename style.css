@@ -767,6 +767,9 @@ body.rpig-review-open {
    ============================================================ */
 
 .rpig-settings {
+  container-type: inline-size;
+  container-name: rpig-settings;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -841,6 +844,13 @@ body.rpig-review-open {
   .rpig-settings-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* SillyTavern drawers are narrow even in a large desktop viewport. */
+@container rpig-settings (max-width: 620px) {
+  .rpig-settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .rpig-settings-header { flex-wrap: wrap; gap: 8px; }
+  .rpig-status-pill { max-width: 100%; overflow-wrap: anywhere; }
 }
 
 /* 卡片容器 */
@@ -1243,7 +1253,7 @@ body.rpig-review-open {
 /* 多视图参考图缩略图列表 */
 .rpig-refs-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
   gap: 10px;
   margin-top: 4px;
 }
@@ -1251,7 +1261,11 @@ body.rpig-review-open {
 .rpig-ref-item {
   position: relative;
   width: 100%;
-  aspect-ratio: 1 / 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  padding: 6px;
   border-radius: var(--rpig-radius-sm);
   border: 1px solid var(--rpig-border);
   background: #000;
@@ -1267,16 +1281,15 @@ body.rpig-review-open {
 
 .rpig-ref-item img {
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: 160px;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 5px;
   display: block;
 }
 
 .rpig-ref-item span {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  position: static;
   padding: 2px 4px;
   background: rgba(0, 0, 0, 0.75);
   font-size: 10px;
@@ -1288,19 +1301,17 @@ body.rpig-review-open {
 }
 
 .rpig-ref-item button {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
+  position: static;
+  min-height: 28px;
+  width: 100%;
+  border-radius: 6px;
   border: none;
-  background: rgba(220, 38, 38, 0.85);
+  background: rgba(139, 122, 232, 0.35);
   color: #fff;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
+  opacity: 1;
   transition: opacity var(--rpig-transition-fast), transform var(--rpig-transition-fast);
   display: flex;
   align-items: center;
@@ -1312,9 +1323,26 @@ body.rpig-review-open {
 }
 
 .rpig-ref-item button:hover {
-  transform: scale(1.15);
-  background: var(--rpig-danger);
+  background: rgba(139, 122, 232, 0.6);
 }
+
+.rpig-ref-item .rpig-ref-primary-btn,
+.rpig-ref-item .rpig-ref-delete {
+  position: absolute;
+  top: 10px;
+  width: 28px;
+  height: 28px;
+  z-index: 1;
+}
+
+.rpig-ref-item .rpig-ref-primary-btn { left: 10px; right: auto; font-size: 17px; }
+.rpig-ref-item .rpig-ref-primary-btn.active { color: #ffe08a; background: rgba(92, 66, 15, 0.95); }
+.rpig-ref-item .rpig-ref-delete { right: 10px; left: auto; background: rgba(180, 35, 35, 0.92); }
+.rpig-ref-item .rpig-ref-delete:hover { background: var(--rpig-danger); }
+.rpig-ref-item .rpig-ref-primary-badge { position: absolute; top: 42px; left: 10px; padding: 2px 5px; font-size: 10px; color: #ffe08a; background: rgba(0,0,0,.75); border-radius: 4px; }
+.rpig-ref-item select { width: 100%; min-width: 0; min-height: 28px; font-size: 11px; }
+.rpig-ref-item label { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+.rpig-ref-item input[type="checkbox"] { width: auto; margin: 0; }
 
 .rpig-ref-empty {
   font-size: 11px;
@@ -1602,4 +1630,16 @@ body.rpig-review-open {
 @keyframes rpig-fade-in {
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Reference annotation labels belong to the preview overlay, never its pixels. */
+.rpig-reference-annotation-source { margin: 6px 0; color: var(--rpig-text-muted, #aaaec2); overflow-wrap: anywhere; font-size: 12px; }
+.rpig-reference-annotation-controls { grid-template-columns: minmax(110px, 1fr) minmax(140px, 2fr) minmax(110px, 1fr); }
+.rpig-reference-annotation-controls input[type="text"] { width: 100%; min-width: 0; box-sizing: border-box; padding: 9px; font: inherit; color: inherit; background: #0c101b; border: 1px solid var(--rpig-border, #3e4355); border-radius: 8px; }
+.rpig-reference-annotation-primary-label { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; }
+.rpig-reference-annotation-badge { display: block; position: absolute; left: 0; top: 0; max-width: min(240px, 70vw); padding: 4px 6px; line-height: 1.3; font-size: 12px; color: #fff; background: #59449ee8; border-radius: 0 0 5px 0; overflow-wrap: anywhere; }
+.rpig-reference-annotation-dialog .rpig-reference-annotation-save { background: #6d5bc5; }
+.rpig-reference-annotation-controls input:focus-visible { outline: 2px solid #c2b6ff; outline-offset: 2px; }
+@media (max-width: 600px) {
+  .rpig-reference-annotation-controls { grid-template-columns: 1fr; }
 }

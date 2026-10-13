@@ -6,6 +6,11 @@ import { generateImage } from '../src/backends.js';
 import { buildCharacterSheetPrompt } from '../src/prompts.js';
 import { getCharacterIdentifier, persistMediaUrl } from '../src/gallery.js';
 import { snapshotGenerationSettings } from '../src/task-context.js';
+import { effectiveCharacterIdentity } from '../src/character-identities.js';
+import { buildReferencePlan, referenceBudgetFor } from '../src/reference-plan.js';
+import { selectCharacterLoras } from '../src/character-lora.js';
+import { activeReferenceViews } from '../src/qwen.js';
+import { saveCardActor, getCardActors } from '../src/card-cast.js';
 
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
 function between(start, end) {
@@ -21,7 +26,8 @@ const json = body => new Response(JSON.stringify(body), { headers: { 'Content-Ty
 function fixture(t) {
     const character = { name: 'Test character', avatar: 'test-character.png', description: 'An adult character in a blue coat.' };
     const context = { chatId: 'chat-one', chat: [] };
-    const settings = { backend: 'openai', backendUrl: 'https://image.test/v1', backendModel: 'gpt-image-1', stylePreset: 'reference', imageSize: '16:9' };
+    const settings = { backend: 'openai', backendUrl: 'https://image.test/v1', backendModel: 'gpt-image-1', stylePreset: 'reference', imageSize: '16:9',
+        characterIdentityOverrides: { 'character:test-character.png': { name: 'Test character', aliases: [] } } };
     const state = { current: true, avatarCalls: [], imageCalls: [], saves: [], gallery: [], refs: [], statuses: [] };
     t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
         if (String(url).includes('/characters/') || String(url).startsWith('characters/') || String(url).includes('/thumbnail?')) {
@@ -34,6 +40,8 @@ function fixture(t) {
         return json({ data: [{ b64_json: png.split(',')[1] }] });
     });
     const deps = { ...utils, generateImage, buildCharacterSheetPrompt, getCharacterIdentifier, persistMediaUrl, snapshotGenerationSettings,
+        effectiveCharacterIdentity, buildReferencePlan, referenceBudgetFor, selectCharacterLoras, activeReferenceViews,
+        getCharacterRefs: async () => state.refs,
         getContext: () => context, getSettings: () => settings, getCurrentCharacter: () => character,
         setGenStatus: (phase, text) => state.statuses.push({ phase, text }), toastr: { warning() {} }, SlashCommandParser: {}, MAX_REFS_PER_CHAR: 50,
         saveBase64AsFile: async (body, folder, filename, extension) => {
@@ -45,6 +53,22 @@ function fixture(t) {
     const render = new Function(...Object.keys(deps), production + '; return renderCharacterSheetFlow;')(...Object.values(deps));
     return { state, character, settings, context, run: (options = {}, runtime = {}) => render(options, { isSourceValid: () => state.current, ...runtime }) };
 }
+
+test('an unconfirmed multi-person card cannot render its title/avatar as a single person', async t => {
+    const f=fixture(t);delete f.settings.characterIdentityOverrides['character:test-character.png'];
+    saveCardActor(f.settings,f.character,{name:'灵羽',anchor:'青蓝长发'});
+    saveCardActor(f.settings,f.character,{name:'洛衡',anchor:'黑色短发'});
+    await assert.rejects(f.run(),{code:'CAST_REFERENCE_REQUIRED'});
+    assert.equal(f.state.avatarCalls.length,0);assert.equal(f.state.imageCalls.length,0);
+});
+test('a named person renders from its own primary instead of the parent card avatar', async t => {
+    const f=fixture(t);saveCardActor(f.settings,f.character,{name:'灵羽',anchor:'青蓝长发'});
+    const actor=getCardActors(f.character,f.settings)[0];
+    f.state.refs=[{dataUrl:png,label:'灵羽主图',isPrimaryIdentity:true}];
+    const result=await f.run({targetCharacter:actor});assert.equal(result.isPersisted,true);
+    assert.equal(f.state.avatarCalls.length,0);assert.equal(f.state.imageCalls.length,1);
+    assert.match(f.state.imageCalls[0].options.body.get('prompt'),/灵羽/);
+});
 
 for (const type of ['three_views', 'full_body']) {
     test(`${type} works with the default reference style and archives the actual image result`, async t => {
@@ -106,4 +130,18 @@ test('backend changes while the avatar loads apply to the next sheet only', asyn
     assert.equal(f.state.imageCalls[0].url, 'https://image.test/v1/images/edits');
     await f.run();
     assert.equal(f.state.imageCalls[1].url, 'https://replacement.test/v1/images/edits');
+});
+
+test('unconfirmed story-card titles never become the identity in the sheet prompt', async t => {
+    const f = fixture(t); f.character.name = 'Adventure Story Card'; delete f.settings.characterIdentityOverrides;
+    await f.run();
+    const form = f.state.imageCalls[0].options.body;
+    assert.match(form.get('prompt'), /the character depicted in the reference image/);
+    assert.doesNotMatch(form.get('prompt'), /Adventure Story Card/);
+});
+
+test('text-only sheets fail before downloading an avatar', async t => {
+    const f = fixture(t); Object.assign(f.settings, { backend: 'comfyui', comfyPreset: 'sd-text', stylePreset: 'character' });
+    await assert.rejects(f.run(), { code: 'COMFY_SHEET_REFERENCE_REQUIRED' });
+    assert.equal(f.state.avatarCalls.length, 0); assert.equal(f.state.imageCalls.length, 0);
 });

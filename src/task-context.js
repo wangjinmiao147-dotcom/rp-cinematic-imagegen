@@ -42,5 +42,13 @@ export function isMessageSourceCurrent(source, context) {
 }
 
 export function snapshotGenerationSettings(settings = {}) {
-    return { ...settings, characterAnchors: { ...settings.characterAnchors } };
+    const records = value => Object.fromEntries(Object.entries(value && typeof value === 'object' ? value : {})
+        .filter(([, record]) => record && typeof record === 'object' && !Array.isArray(record))
+        .map(([key, record]) => [key, { ...record, ...(Array.isArray(record.aliases) ? { aliases: [...record.aliases] } : {}) }]));
+    return { ...settings, characterAnchors: { ...settings.characterAnchors },
+        characterLoras: records(settings.characterLoras),
+        characterIdentityOverrides: records(settings.characterIdentityOverrides),
+        characterCast: Object.fromEntries(Object.entries(settings.characterCast || {})
+            .filter(([, actors]) => Array.isArray(actors)).map(([key, actors]) => [key,
+                actors.map(actor => ({ ...actor, aliases: Array.isArray(actor?.aliases) ? [...actor.aliases] : [] }))])) };
 }

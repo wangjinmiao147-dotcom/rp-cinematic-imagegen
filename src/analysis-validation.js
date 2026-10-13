@@ -144,7 +144,12 @@ export function assertUsableInstruction(text, stage = '图片指令') {
     }
     const failure = /the prompt could not be submitted|generative ai prohibited use|policies\.google\.com\/terms\/generative-ai|(?:i (?:cannot|can't|am unable to)|i'm unable to) (?:help|assist|comply|generate|fulfill)|(?:request|prompt) (?:was |has been )?(?:blocked|rejected)|(?:无法|不能)(?:协助|帮助|满足|生成|提供)(?:此|这|该)|违反.{0,12}(?:使用政策|安全政策|内容政策)|quota exceeded|resource_exhausted|rate limit exceeded|invalid api key/i;
     if (failure.test(text)) {
-        throw new RpigError('ANALYSIS_REJECTED', `${stage}返回了拒绝、错误或限流消息，未获得有效剧情指令，已停止生图；原始返回已记录`);
+        const reason = /quota exceeded|resource_exhausted|rate limit exceeded/i.test(text)
+            ? '上游分析接口返回额度或限流限制，可等待后重试或选择其他可用分析模型'
+            : /invalid api key/i.test(text)
+                ? '上游分析接口拒绝了 API 密钥，请检查分析接口配置'
+                : '上游分析接口拒绝了当前请求，可检查原文及分析接口，或自行选择其他可用分析模型';
+        throw new RpigError('ANALYSIS_REJECTED', `${stage}：${reason}；未获得有效剧情指令，已停止生图，不自动重复请求；原始返回已记录`);
     }
 }
 

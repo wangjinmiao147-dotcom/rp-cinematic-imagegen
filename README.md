@@ -2,11 +2,27 @@
 
 面向 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的角色扮演配图扩展，依据当前剧情、实际入镜人物和各自参考图生成剧情剧照、表情特写、角色设计图，在聊天与图库中管理结果。
 
-当前版本：**v2.9.62**（2026-10-12），基于 v2.9.57 的维护修复与错误报告更新。MIT 许可证；由 RP 电影配图 contributors 维护。模型与依赖出处见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+当前版本：**v2.9.63**（2026-10-14）。新增 ComfyUI 内置工作流、角色 LoRA、参考图标注、真实姓名、卡内独立人物与本地像素/步数控制；修复参考图身份说明、衣装漂移和 Gemini 思考草图误选。已通过 755 项回归。MIT 许可证；由 RP 电影配图 contributors 维护。模型与依赖出处见 [第三方说明](THIRD_PARTY_NOTICES.md)。
 
 ![v2.9.57 发布版工作台示意](docs/images/public-workbench-v2.9.57.png)
 
 截图使用虚构夹具和隔离的宿主接口，展示实际发布模块的工作台；未调用模型，不是生成图片质量验收。
+
+## v2.9.63 更新
+
+ComfyUI 设置新增连接与节点检测、已安装模型选择，以及基础文生图、单图图生图、Qwen 原生多图编辑预置；仍可使用原有自定义 API 工作流。预置负责构建工作流，模型权重由用户自行准备，不自动下载安装。
+
+SD 预置支持普通 SD 与 LCM 快速模型两种采样方式。LCM 模式自动构建对应节点链，留空参数默认 8 步、CFG 2 和小画幅，不用导入其他工作流 JSON。必须搭配实际 LCM 权重，不能直接让普通 SD 模型变成快速模型。
+
+一张世界卡或故事卡可添加多个独立人物，每人拥有自己的姓名、别名、外貌与参考图库。人物改名保留内部标识，不改变参考图归属；名单仅作为候选资料，AI仍按正文判断谁入镜。
+
+形象工作台可分别填写角色真实姓名、别名和角色 LoRA。卡片标题只用于区分卡片，真实姓名留空时由 AI 结合正文判断；参考图与 LoRA 使用稳定头像标识绑定，不随显示名改变。角色 LoRA 默认关闭，只在 ComfyUI 内置预置且单人入镜时加载，多人场景提示跳过。
+
+SD 多人参考排布为实验选项：使用2–4位独立人物的主图进行排布与分区提示，只用核心节点，不加载多人LoRA。DreamShaper8 LCM实测能执行，但外观和互动仍不可靠，不能当作精准多人锁脸方案。
+
+参考图可框选人物区域并另存到对应人物图库，保留原图，编号和姓名仅显示在标注预览中。生图按后端容量分配参考图，优先保留各入镜人物主身份图，不能为凑数量静默丢弃明确要求的人物。
+
+操作见 [本地 ComfyUI 与角色参考图指南](docs/local-comfy-guide.zh-CN.md)，变更与验证范围见 [v2.9.63 发布说明](docs/RELEASE_v2.9.63.md)。已在真实酒馆使用本地反代的 Gemini 3.1 Flash Image 验证四人同框、双人互动和独立参考图上传；DreamShaper8 LCM已实测内置文生图、图生图及实验多人排布，Qwen Image2.1已实测512档双人/四人。单人别名检查通过预览后取消，未请求图片后端。本机角色LoRA效果和手机实机仍待验收。
 
 ## 本次维护修复
 
@@ -14,7 +30,7 @@ v2.9.62 修复第 3 步人物姓名误判：英文指令不再逐字匹配规范
 
 已修复参考图读取兼容、并发图库保存、自动检测取消竞态、排队消息身份失效、角色形象默认参考模式、ComfyUI 上传和执行失败处理，以及图库窗口跨会话失效。参考图采用稳定记录标识与原子修改，普通生图、局部精修和角色形象共用任务队列。详见 [v2.9.60 修复说明](docs/RELEASE_v2.9.60.md)。
 
-完整更新见 [v2.9.62 发布说明](docs/RELEASE_v2.9.62.md)，安装包见 [v2.9.62 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.62)。
+完整更新见 [v2.9.63 发布说明](docs/RELEASE_v2.9.63.md)，安装包见 [v2.9.63 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.63)。
 
 ## 一键导出错误报告
 
@@ -34,13 +50,13 @@ v2.9.62 修复第 3 步人物姓名误判：英文指令不再逐字匹配规范
 
 ### ZIP 手动安装
 
-1. 从 [v2.9.62 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.62) 下载 `rp-cinematic-imagegen-v2.9.62.zip`。
+1. 从 [v2.9.63 Release](https://github.com/wangjinmiao147-dotcom/rp-cinematic-imagegen/releases/tag/v2.9.63) 下载 `rp-cinematic-imagegen-v2.9.63.zip`。
 2. 解压得到 `rp-cinematic-imagegen` 文件夹，放入 `<SillyTavern 根目录>/data/<用户>/extensions/`（默认用户为 `default-user`）。
 3. 刷新页面并启用扩展。避免解压成扩展目录内的第二层同名文件夹。
 
 ### 酒馆助手安装器
 
-已安装酒馆助手（JS-Slash-Runner）的用户可下载同一 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.62.json`，在“酒馆助手 → 脚本库”导入为全局脚本并确认启用，使用“安装 / 更新 RP 电影配图”按钮。
+已安装酒馆助手（JS-Slash-Runner）的用户可下载同一 Release 中的 `rp-cinematic-imagegen-tavern-helper-installer-v2.9.63.json`，在“酒馆助手 → 脚本库”导入为全局脚本并确认启用，使用“安装 / 更新 RP 电影配图”按钮。
 
 JSON 是安装器，实际运行的是原生扩展。安装器先安装正式目录，再处理旧目录 `rp-cinematic-v2`；配置键仍为 `rp-cinematic-imagegen`，优先保留已有正式设置。迁移前可备份酒馆数据，不要公开备份或密钥。
 
@@ -74,7 +90,7 @@ JSON 是安装器，实际运行的是原生扩展。安装器先安装正式目
 
 云端密钥不会发送给本地回退接口。启用后，当前阶段的剧情和分析输入会发送给你配置的回退地址。
 
-源码在 `tools/local-scene-llm`，Release 同时提供独立 `rp-cinematic-local-scene-llm-v2.9.62.zip`。Windows + NVIDIA 环境已验证，其他系统与显卡尚未验证。模型来源、校验值、标签导入、端口、资源限制和启动参数见 [本地服务安装说明](tools/local-scene-llm/README.md)。
+源码在 `tools/local-scene-llm`，Release 同时提供独立 `rp-cinematic-local-scene-llm-v2.9.63.zip`。Windows + NVIDIA 环境已验证，其他系统与显卡尚未验证。模型来源、校验值、标签导入、端口、资源限制和启动参数见 [本地服务安装说明](tools/local-scene-llm/README.md)。
 
 代理默认仅监听 `127.0.0.1:11436`，连接本机 Ollama `127.0.0.1:11434`，仅允许酒馆 `localhost:8000` / `127.0.0.1:8000` 的跨域来源。其他酒馆端口需修改 `allowedOrigins`。手机的 `127.0.0.1` 是手机自身，默认方案不能直接供手机远程连接。
 
@@ -93,7 +109,7 @@ JSON 是安装器，实际运行的是原生扩展。安装器先安装正式目
 - OpenAI 兼容：无参考图可用 generations，有参考图使用 edits 或服务声明的 Chat / Gemini 图片协议。多图服务需支持相应协议；编辑失败保留错误，不自动删图降级。
 - Gemini：使用服务支持的图片协议；官方地址密钥通过 `x-goog-api-key`。
 - SD WebUI：需启用 API；现有 img2img 适配器只能使用一张参考图，要求多图时明确停止。
-- ComfyUI：需可用服务和 API 格式 Workflow，能力取决于工作流及适配器。
+- ComfyUI：v2.9.62 使用 API 格式 Workflow。v2.9.63 本地候选新增内置预置：基础文生图不发参考图、SD 图生图仅一张、Qwen 多图编辑 1–3 张；自定义工作流保留原有配置。能力与准备方式见 [本地指南](docs/local-comfy-guide.zh-CN.md)。
 - 酒馆 SD：先配置酒馆自己的图片生成服务。
 
 本地 LLM 服务只补文字分析，不生成图片；私有图片桥接、模型权重和第三方中转服务不随扩展分发。远程接口可能需配置 CORS。

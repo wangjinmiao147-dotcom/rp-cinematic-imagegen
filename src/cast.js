@@ -24,13 +24,14 @@ export function normalizeCastCharacters(rawCharacters, {
     messageIndex = -1,
     focalCharacter = null,
     fallbackToFocal = true,
+    focalIdentityIsConfirmed = true,
 } = {}) {
     const recent = Array.isArray(chat) ? chat.slice(Math.max(0, messageIndex - 12), messageIndex + 1) : [];
     const userName = String(context?.name1 || [...recent].reverse().find(message => message?.is_user)?.name || 'User protagonist').trim();
     const focalName = String(focalCharacter?.name || chat?.[messageIndex]?.name || context?.name2 || 'Current role character').trim();
     const currentMessageName = String(chat?.[messageIndex]?.name || '').trim();
     const userAliases = new Set(['user', 'you', '用户', '玩家', '主人公', '主角', 'protagonist', 'user protagonist', 'player character', userName.toLowerCase()]);
-    const focalAliases = new Set(['ai', 'assistant', 'bot', '角色', '当前角色', '当前回复角色', 'current character', 'current role character', focalName.toLowerCase(), currentMessageName.toLowerCase()].filter(Boolean));
+    const focalAliases = new Set((focalIdentityIsConfirmed ? ['ai', 'assistant', 'bot', '角色', '当前角色', '当前回复角色', 'current character', 'current role character', focalName.toLowerCase(), currentMessageName.toLowerCase()] : []).filter(Boolean));
     const values = Array.isArray(rawCharacters) ? rawCharacters : [];
     const normalized = [];
     const seen = new Set();

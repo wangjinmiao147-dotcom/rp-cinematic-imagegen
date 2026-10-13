@@ -194,3 +194,16 @@ test('array accessors are not executed when building reports from malformed coll
     assert.equal(accessed, false);
     assert.ok(Array.isArray(result.records));
 });
+
+test('new workflow and reference errors export known codes and counts without model or identity text', () => {
+    for (const code of ['COMFY_PRESET_UNAVAILABLE', 'REFERENCE_BUDGET_EXCEEDED', 'CHARACTER_LORA_STRENGTH_INVALID']) {
+        const result = report({ diagnostics: [{ status: 'failed', errorCode: code, loraCount: 1,
+            referenceSelection: { supplied: 4, omitted: [{ identityName: 'private-person', label: 'private-model' }] },
+            characterLoras: [{ name: 'private-model', identityId: 'private-person' }] }] });
+        assert.equal(result.records[0].errorCode, code);
+        assert.equal(result.records[0].loraCount, 1);
+        assert.equal(result.records[0].referenceSuppliedCount, 4);
+        assert.equal(result.records[0].referenceOmittedCount, 1);
+        assertAbsent(result, ['private-person', 'private-model']);
+    }
+});

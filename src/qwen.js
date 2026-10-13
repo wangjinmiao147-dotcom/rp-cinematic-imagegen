@@ -1,7 +1,9 @@
 import { BODY_STRUCTURE_RULES, postureRulesForStory, VIEWPOINT_STRUCTURE_RULES, ARTISTIC_ANATOMY_RULE, requestsArtisticBodyAnatomy, hasRequestedThoughtBubble, framingPreference, reflectionRulesForStory, requestsReflection } from './visual-constraints.js';
+import { configuredLocalImageSize } from './render-size.js';
 
 // Local Qwen uses its own bounded controls; SD controls belong to SD only.
 export function isLocalQwen(settings = {}) {
+    if (['comfyui', 'sd', 'tavern-sd'].includes(settings.backend)) return false;
     try {
         const url = new URL(settings.backendUrl);
         return ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
@@ -15,6 +17,8 @@ export function qwenSteps(value) {
 }
 
 export function qwenSize(settings = {}, ratio = '16:9') {
+    const selectedSize = configuredLocalImageSize(settings);
+    if (selectedSize) return selectedSize;
     const resolution = settings.qwenResolution;
     const tier = resolution === '512x288' ? 0 : resolution === '768x432' ? 1 : resolution === '1024x576' ? 2
         : settings.qwenResolutionTier === 'high' ? 2 : 0;
@@ -30,6 +34,7 @@ export function qwenSize(settings = {}, ratio = '16:9') {
 }
 
 export function qwenIdentityRenderSettings(settings = {}, refs = []) {
+    if (configuredLocalImageSize(settings)) return settings;
     // An explicitly chosen lightweight output must never be promoted by the old checkbox.
     if (settings.qwenResolution === '512x288' || (!settings.qwenResolution && settings.qwenResolutionTier !== 'high')) return settings;
     if (settings.qwenIdentityDetailBoost !== true || !refs.some(r => (r.role || r.kind) === 'identity-primary')) return settings;
@@ -42,6 +47,7 @@ export function qwenIdentityRenderSettings(settings = {}, refs = []) {
 // An opt-in whole-scene render keeps the saved sampler controls and returns
 // a 512-long-edge illustration after one diffusion pass and whole-frame resize.
 export function qwenSceneRenderPlan(settings = {}, refs = [], ratio = '16:9', prompt = '') {
+    if (configuredLocalImageSize(settings)) return null;
     if (settings.qwenSceneDetail !== true || !refs.some(r => (r.role || r.kind) === 'identity-primary')) return null;
     // The high-resolution mirror regression changed the physical view. Keep
     // reflection scenes on their previously validated saved-resolution path.
